@@ -5,6 +5,8 @@ use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
 use networking::Agent;
 
+const URL: &str = "https://chapmanganato.to";
+
 fn get_title(el: &ElementRef, selector: &str, attr: &str) -> Option<String> {
     let selector = Selector::parse(selector).ok()?;
     el.select(&selector)
@@ -82,7 +84,7 @@ pub fn parse_search_manga_list(
 }
 
 pub fn get_manga_detail(path: &str, source_id: i64, client: &Agent) -> Result<MangaInfo> {
-    let body = client.get(&format!("https://chapmanganato.com{path}"))
+    let body = client.get(&format!("{URL}{path}"))
         .call()?
         .into_string()?;
 
@@ -137,7 +139,7 @@ pub fn get_manga_detail(path: &str, source_id: i64, client: &Agent) -> Result<Ma
 }
 
 pub fn get_chapters(path: &str, source_id: i64, client: &Agent) -> Result<Vec<ChapterInfo>> {
-    let body = client.get(&format!("https://chapmanganato.com{path}"))
+    let body = client.get(&format!("{URL}{path}"))
         .call()?
         .into_string()?;
 

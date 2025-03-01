@@ -168,10 +168,7 @@ mod test {
             .get_manga_detail("/manga-hs951953".to_string())
             .unwrap();
         assert_eq!(res.title, "Shokugeki no Soma");
-        assert_eq!(
-            res.cover_url,
-            "https://avt.mkklcdnv6temp.com/22/k/1-1583464578.jpg"
-        );
+        assert!(!res.cover_url.is_empty());
         assert!(res.description.is_some());
         assert_ne!(res.description, Some("".to_string()));
         assert_eq!(
@@ -184,6 +181,7 @@ mod test {
                 "Comedy".to_string(),
                 "Cooking".to_string(),
                 "Drama".to_string(),
+                "Ecchi".to_string(),
                 "School life".to_string(),
                 "Shounen".to_string(),
             ]

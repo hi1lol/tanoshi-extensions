@@ -20,7 +20,7 @@ lazy_static! {
 
 const ID: i64 = 17;
 const NAME: &str = "365Manga";
-const URL: &str = "https://harimanga.com";
+const URL: &str = "https://harimanga.me";
 
 pub struct ThreeSixtyFiveManga {
     preferences: Vec<Input>,

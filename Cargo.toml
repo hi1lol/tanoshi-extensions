@@ -7,6 +7,8 @@ exclude = [
     "extensions/mmscans",
     "extensions/tritiniascans",
     "extensions/mangatx",
+    "extensions/mangasee",
+    "extensions/manga4life",
 ]
 
 [profile.release]

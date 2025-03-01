@@ -5,8 +5,8 @@ This repository host extenstions for tanoshi
 | ID  | Name                | Note                                       | Status  |
 |-----|---------------------|--------------------------------------------|---------|
 | 2   | Mangadex            |                                            | Active  |
-| 3   | Mangasee            |                                            | Active  |
-| 4   | Manga4Life          |                                            | Active  |
+| 3   | Mangasee            | Site closed                                | Removed |
+| 4   | Manga4Life          | Site closed                                | Removed |
 | 5   | Catmanga            | Site closed                                | Removed |
 | 6   | NHentai             |                                            | Broken  |
 | 7   | Guya.moe            |                                            | Active  |
@@ -29,7 +29,7 @@ This repository host extenstions for tanoshi
 | 24  | Asurascans          | Site structure changed, use 25             | Removed |
 | 25  | AsuraScans          |                                            | Active  |
 | 26  | LeviatanScans       |                                            | Active  |
-| 27  | MangaTX             |                                            | Removed |
+| 27  | MangaTX             | Site closed                                | Removed |
 
 ## Diclaimer
 The developer of this application does not host any content and does not have affiliation with any content provider.

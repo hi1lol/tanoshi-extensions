@@ -65,11 +65,16 @@ jobs:
           curl -L $URL -o $HOME/.cargo/bin/tanoshi-cli
           chmod +x $HOME/.cargo/bin/tanoshi-cli
           $HOME/.cargo/bin/tanoshi-cli --path target/release generate-json
-          mv output/${{ matrix.platform.target }}/index.json output/
 
-      - run: |
+      # Generate already puts things in output folder
+      - if: ${{ matrix.platform.target != 'x86_64-unknown-linux-gnu' }}
+        run: |
           mkdir -p output/${{ matrix.platform.target }}/
           cp target/release/*.${{ matrix.platform.extension }} output/${{ matrix.platform.target }}/
+
+      # Windows already has the correct names
+      - if: ${{ matrix.platform.target != 'x86_64-unknown-linux-gnu' && matrix.platform.target != 'x86_64-pc-windows-msvc' }}
+        run: cd output/${{ matrix.platform.target }}/ && for f in *.${{ matrix.platform.extension }};do mv $f ${f#lib}; done; cd ../..
 
       - name: Upload dist
         uses: actions/upload-artifact@v4

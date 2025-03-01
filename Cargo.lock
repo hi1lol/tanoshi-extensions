@@ -579,17 +579,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mangatx"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "lazy_static",
- "madara",
- "networking",
- "tanoshi-lib",
-]
-
-[[package]]
 name = "manhuafast"
 version = "0.3.0"
 dependencies = [

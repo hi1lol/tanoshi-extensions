@@ -29,7 +29,7 @@ This repository host extenstions for tanoshi
 | 24  | Asurascans          | Site structure changed, use 25             | Removed |
 | 25  | AsuraScans          |                                            | Active  |
 | 26  | LeviatanScans       |                                            | Active  |
-| 27  | MangaTX             |                                            | Active  |
+| 27  | MangaTX             |                                            | Removed |
 
 ## Diclaimer
 The developer of this application does not host any content and does not have affiliation with any content provider.

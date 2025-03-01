@@ -233,6 +233,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "firstkissmanhua"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "lazy_static",
+ "madara",
+ "networking",
+ "tanoshi-lib",
+]
+
+[[package]]
 name = "flate2"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -546,34 +557,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "mangalife"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "lazy_static",
- "nepnep",
- "networking",
- "tanoshi-lib",
-]
-
-[[package]]
 name = "manganato"
 version = "0.3.1"
 dependencies = [
  "anyhow",
  "lazy_static",
  "mangakakalot-common",
- "networking",
- "tanoshi-lib",
-]
-
-[[package]]
-name = "mangasee"
-version = "0.3.0"
-dependencies = [
- "anyhow",
- "lazy_static",
- "nepnep",
  "networking",
  "tanoshi-lib",
 ]

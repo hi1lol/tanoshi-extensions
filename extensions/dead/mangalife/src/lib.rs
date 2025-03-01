@@ -17,7 +17,7 @@ lazy_static! {
 
 const ID: i64 = 4;
 const NAME: &str = "MangaLife";
-const URL: &str = "https://manga4life.com";
+const URL: &str = "https://weebcentral.com";
 
 pub struct Mangalife {
     preferences: Vec<Input>,
@@ -96,5 +96,67 @@ impl Extension for Mangalife {
 
     fn get_pages(&self, path: String) -> Result<Vec<String>> {
         nepnep::get_pages(URL, path, &self.client)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn test_get_latest_manga() {
+        let mangalife = Mangalife::default();
+
+        let res = mangalife.get_latest_manga(1).unwrap();
+        assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_get_popular_manga() {
+        let mangalife = Mangalife::default();
+
+        let res = mangalife.get_popular_manga(1).unwrap();
+        assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_search_manga() {
+        let mangalife = Mangalife::default();
+
+        let res = mangalife
+            .search_manga(1, Some("komi".to_string()), None)
+            .unwrap();
+        assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_get_manga_detail() {
+        let mangalife = Mangalife::default();
+
+        let res = mangalife
+            .get_manga_detail("/manga/a96676e5-8ae2-425e-b549-7f15dd34a6d8".to_string())
+            .unwrap();
+        assert_eq!(res.title, "Komi-san wa Komyushou Desu.");
+    }
+
+    #[test]
+    fn test_get_chapters() {
+        let mangalife = Mangalife::default();
+
+        let res = mangalife
+            .get_chapters("/manga/a96676e5-8ae2-425e-b549-7f15dd34a6d8".to_string())
+            .unwrap();
+        assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_get_pages() {
+        let mangalife = Mangalife::default();
+
+        let res = mangalife
+            .get_pages("/chapter/03d3e4b9-db8d-4fb5-88fc-b6a087bd6410".to_string())
+            .unwrap();
+
+        assert!(!res.is_empty());
     }
 }

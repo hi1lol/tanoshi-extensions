@@ -1,14 +1,7 @@
 [workspace]
 members = ["extensions/*", "common/*"]
 exclude = [
-    "extensions/asurascans",
-    "extensions/reaperscans",
-    "extensions/firstkissmanhua",
-    "extensions/mmscans",
-    "extensions/tritiniascans",
-    "extensions/mangatx",
-    "extensions/mangasee",
-    "extensions/manga4life",
+    "extensions/dead",
 ]
 
 [profile.release]

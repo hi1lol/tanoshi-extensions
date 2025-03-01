@@ -6,7 +6,7 @@ use std::env;
 
 const ID: i64 = 7;
 const NAME: &str = "Guya";
-const URL: &str = "https://guya.moe";
+const URL: &str = "https://guya.cubari.moe";
 
 tanoshi_lib::export_plugin!(register);
 

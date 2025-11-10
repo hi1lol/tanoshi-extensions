@@ -346,7 +346,7 @@ dependencies = [
 
 [[package]]
 name = "guya"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "guyalib",
@@ -631,7 +631,7 @@ dependencies = [
 
 [[package]]
 name = "mangadex"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "manhuafast"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "manhwa18cc"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -762,7 +762,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nhentai"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1378,7 +1378,7 @@ dependencies = [
 
 [[package]]
 name = "three_sixty_five_manga"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -1589,7 +1589,7 @@ dependencies = [
 
 [[package]]
 name = "weebcentral"
-version = "0.1.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",

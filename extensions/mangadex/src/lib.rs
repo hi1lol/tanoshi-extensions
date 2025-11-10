@@ -400,7 +400,7 @@ mod test {
         let mangadex = Mangadex::default();
 
         let res = mangadex
-            .get_pages("/chapter/03d3e4b9-db8d-4fb5-88fc-b6a087bd6410".to_string())
+            .get_pages("/chapter/54b81138-ce88-408c-8e5a-1b301ed68d8d".to_string())
             .unwrap();
 
         assert!(!res.is_empty());

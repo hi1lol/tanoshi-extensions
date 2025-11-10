@@ -95,7 +95,6 @@ impl Default for NHentai {
     }
 }
 
-// add near the top
 fn nh_field_key(ui_label: &str) -> &'static str {
     match ui_label {
         "Tag" => "tag",
@@ -111,6 +110,10 @@ fn nh_field_key(ui_label: &str) -> &'static str {
 fn norm_value(v: &str) -> String {
     // NH prefers underscores for multi-word tokens
     v.trim().replace(' ', "_")
+}
+
+fn normalize_url(u: &str) -> String {
+    if u.starts_with("//") { format!("https:{}", u) } else { u.to_string() }
 }
 
 impl NHentai {
@@ -226,7 +229,7 @@ impl NHentai {
                 .select(&thumbnail_selector)
                 .flat_map(|thumbnail| thumbnail.value().attr("data-src"))
                 .next()
-                .map(|s| s.to_string())
+                .map(|s| normalize_url(s))
                 .ok_or_else(|| anyhow!("cover_url not found"))?;
 
             let path = gallery
@@ -411,7 +414,7 @@ impl Extension for NHentai {
             .select(&thumbnail_selector)
             .flat_map(|el| el.value().attr("data-src"))
             .next()
-            .map(|s| s.to_string())
+            .map(|s| normalize_url(s))
             .ok_or_else(|| anyhow!("cover not found"))?;
 
         let title = document

@@ -281,7 +281,7 @@ impl Extension for NHentai {
             name: "NHentai".to_string(),
             url: URL.to_string(),
             version: env!("CARGO_PKG_VERSION"),
-            icon: "https://static.nhentai.net/img/logo.090da3be7b51.svg",
+            icon: "https://nhentai.net/static/img/logo.14bbfa78d3d0.svg",
             languages: Lang::Multi(vec!["en".to_string(), "jp".to_string(), "ch".to_string()]),
             nsfw: true,
         }

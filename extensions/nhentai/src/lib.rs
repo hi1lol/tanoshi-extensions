@@ -1,13 +1,14 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use networking::{build_flaresolverr_client, build_ureq_agent, Agent};
+use networking::FlareClient;
 use scraper::{Html, Selector};
 use std::env;
 use tanoshi_lib::prelude::{
     ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar,
 };
+use urlencoding::encode;
 
 pub static ID: i64 = 6;
 pub static NAME: &str = "nhentai";
@@ -82,34 +83,47 @@ lazy_static! {
 
 pub struct NHentai {
     preferences: Vec<Input>,
-    client: Agent,
+    net: FlareClient,
 }
 
 impl Default for NHentai {
     fn default() -> Self {
-        let mut instance = Self {
+        Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None),
-        };
-
-        // If flaresolverr_url is set, build the client with it
-        if let Ok(flaresolverr_url) = env::var("FLARESOLVERR_URL") {
-            instance.client = build_flaresolverr_client(URL, &flaresolverr_url).unwrap();
+            net: FlareClient::from_env_or_plain(URL),
         }
-
-        instance
     }
 }
 
+// add near the top
+fn nh_field_key(ui_label: &str) -> &'static str {
+    match ui_label {
+        "Tag" => "tag",
+        "Characters" => "character",
+        "Artists" => "artist",
+        "Groups" => "group",
+        "Categories" => "category",
+        "Parodies" => "parody",
+        _ => "tag",
+    }
+}
+
+fn norm_value(v: &str) -> String {
+    // NH prefers underscores for multi-word tokens
+    v.trim().replace(' ', "_")
+}
+
 impl NHentai {
-    fn query(&self, filters: Option<Vec<Input>>) -> String {
-        let mut query = vec![];
-        let mut sort = None;
+    fn query_parts(&self, filters: Option<Vec<Input>>) -> (String, Option<String>) {
+        let mut query: Vec<String> = vec![];
+        let mut sort: Option<String> = None;
+
+        // preferences: language + global blacklist
         for pref in self.preferences.iter() {
             if LANGUAGE_SELECT.eq(pref) {
                 if let Input::Select { state, values, .. } = pref {
                     if let Some(InputType::String(lang)) =
-                        state.and_then(|index| values.get(index as usize))
+                        state.and_then(|i| values.get(i as usize))
                     {
                         if lang != "Any" {
                             query.push(format!("language:{}", lang.to_lowercase()));
@@ -122,29 +136,36 @@ impl NHentai {
                 } = pref
                 {
                     for tag in state.split(',') {
-                        query.push(format!("-tag:{}", tag.trim()))
+                        let t = norm_value(tag);
+                        if !t.is_empty() {
+                            query.push(format!("-tag:{t}"));
+                        }
                     }
                 }
             }
         }
 
+        // filters
         if let Some(filters) = filters {
-            for filter in filters.iter() {
+            for filter in filters {
                 match filter {
                     Input::Text {
                         name,
                         state: Some(state),
                         ..
-                    } if name == &TAG_FILTER.name() => {
-                        for tag in state.split(',') {
-                            if tag.starts_with('-') {
-                                query.push(format!(
-                                    "-{}:{}",
-                                    name.to_lowercase(),
-                                    tag.trim().replace("-", "")
-                                ))
+                    } if name == TAG_FILTER.name() => {
+                        let key = nh_field_key(&name);
+                        for raw in state.split(',') {
+                            let raw = raw.trim();
+                            if raw.is_empty() {
+                                continue;
+                            }
+                            let neg = raw.starts_with('-');
+                            let term = norm_value(raw.trim_start_matches('-'));
+                            if neg {
+                                query.push(format!("-{key}:{term}"));
                             } else {
-                                query.push(format!("{}:{}", name.to_lowercase(), tag.trim()))
+                                query.push(format!("{key}:{term}"));
                             }
                         }
                     }
@@ -152,16 +173,22 @@ impl NHentai {
                         name,
                         state: Some(state),
                         ..
-                    } => query.push(format!("{}:{}", name.to_lowercase(), state.trim())),
+                    } => {
+                        let key = nh_field_key(&name);
+                        let term = norm_value(&state);
+                        if !term.is_empty() {
+                            query.push(format!("{key}:{term}"));
+                        }
+                    }
                     Input::Select {
                         name,
                         values,
                         state,
                         ..
-                    } if name == &SORT_FILTER.name() => {
-                        let state = state.unwrap_or(0);
-                        if let Some(InputType::String(state)) = values.get(state as usize) {
-                            sort = Some(format!("sort={}", state.replace(" ", "-").to_lowercase()));
+                    } if name == SORT_FILTER.name() => {
+                        let idx = state.unwrap_or(0) as usize;
+                        if let Some(InputType::String(v)) = values.get(idx) {
+                            sort = Some(v.replace(' ', "-").to_lowercase()); // e.g., popular-week
                         }
                     }
                     _ => {}
@@ -169,22 +196,19 @@ impl NHentai {
             }
         }
 
-        let mut query_str = if query.is_empty() {
+        let q = if query.is_empty() {
             r#""""#.to_string()
         } else {
             query.join(" ")
         };
-
-        if let Some(sort) = sort {
-            query_str = format!("{query_str}&{sort}");
-        }
-
-        query_str
+        (q, sort)
     }
 
     fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
-        let mut resp = self.client.get(url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .fetch_text(url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let gallery_selector =
@@ -264,14 +288,15 @@ impl Extension for NHentai {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        self.get_manga_list(&format!(
-            "{URL}/search/?q={}&sort=popular&page={page}",
-            self.query(None)
-        ))
+        let (q, _) = self.query_parts(None);
+        let q = encode(&q);
+        self.get_manga_list(&format!("{URL}/search/?q={q}&sort=popular&page={page}"))
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        self.get_manga_list(&format!("{URL}/search/?q={}&page={page}", self.query(None)))
+        let (q, _) = self.query_parts(None);
+        let q = encode(&q);
+        self.get_manga_list(&format!("{URL}/search/?q={q}&page={page}"))
     }
 
     fn search_manga(
@@ -280,22 +305,29 @@ impl Extension for NHentai {
         query: Option<String>,
         filters: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let url = if filters.is_some() {
-            format!("{URL}/search/?q={}&page={page}", self.query(filters))
+        let url = if let Some(filters) = filters {
+            let (q_raw, sort) = self.query_parts(Some(filters));
+            let q = encode(&q_raw);
+            match sort {
+                Some(s) => format!("{URL}/search/?q={q}&sort={s}&page={page}"),
+                None => format!("{URL}/search/?q={q}&page={page}"),
+            }
         } else if let Some(query) = query {
-            format!("{URL}/search/?q={query}&sort=popular&page={page}")
+            let q = encode(&query);
+            format!("{URL}/search/?q={q}&sort=popular&page={page}")
         } else {
             return Err(anyhow!("query and filters cannot be both empty"));
         };
-
         self.get_manga_list(&url)
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
         let url = format!("{}{}", URL, path);
         // Send the request and get the response as a string
-        let mut resp = self.client.get(&url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let gallery_id_selector = Selector::parse("h3[id=\"gallery_id\"]")
@@ -419,8 +451,10 @@ impl Extension for NHentai {
         let url = format!("{}{}", URL, path);
 
         // Send the request and get the response as a string
-        let mut resp = self.client.get(&url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let scanlator_selector = Selector::parse("a[href^=\"/group/\"] > .name")
@@ -457,21 +491,31 @@ impl Extension for NHentai {
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         let url = format!("{}{}", URL, path);
 
-        // Send the request and get the response as a string
-        let mut resp = self.client.get(&url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let page_selector = Selector::parse(".thumb-container > .gallerythumb > img")
             .map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
 
         let mut pages = vec![];
-        let re = Regex::new(r"^https:\/\/t(\d*)\..+\/(\d+)\/(\d+)t.(.+)$")?;
+        // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
+        let re = Regex::new(r"^https?://t(\d*)\..+/(\d+)/(\d+)t\.(\w+)$")?;
         for thumb in document.select(&page_selector) {
-            if let Some(url) = thumb.value().attr("data-src") {
+            if let Some(orig) = thumb.value().attr("data-src") {
+                // normalize protocol-relative URLs
+                let url = if orig.starts_with("//") {
+                    format!("https:{}", orig)
+                } else {
+                    orig.to_string()
+                };
+
                 let cap = re
-                    .captures(url)?
-                    .ok_or(anyhow::anyhow!("no captured regex for {url}"))?;
+                    .captures(&url)?
+                    .ok_or_else(|| anyhow!("no captured regex for {url}"))?;
+
                 pages.push(format!(
                     "https://i{}.nhentai.net/galleries/{}/{}.{}",
                     &cap[1], &cap[2], &cap[3], &cap[4]
@@ -568,7 +612,7 @@ mod test {
                 }
             } else if PARODIES_FILTER.eq(filter) {
                 if let Input::Text { state, .. } = filter {
-                    *state = Some("azur lane".to_string());
+                    *state = Some("azur-lane".to_string());
                 }
             }
         }

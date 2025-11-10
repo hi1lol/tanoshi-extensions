@@ -1,7 +1,9 @@
+use anyhow::{Result, anyhow};
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use std::error::Error;
-use ureq::{http::Uri, Cookie};
+use std::sync::{Arc, Mutex};
+use ureq::{Cookie, http::Uri};
 
 pub type Agent = ureq::Agent;
 
@@ -78,7 +80,8 @@ fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolve
         // Expires
         if let Some(expiry) = c.expiry {
             if let Ok(ts) = CookieOffsetDateTime::from_unix_timestamp(expiry as i64) {
-                let max_age = ts.unix_timestamp() - CookieOffsetDateTime::now_utc().unix_timestamp();
+                let max_age =
+                    ts.unix_timestamp() - CookieOffsetDateTime::now_utc().unix_timestamp();
                 if max_age > 0 {
                     parts.push(format!("Max-Age={}", max_age));
                 }
@@ -94,7 +97,8 @@ fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolve
             format!("https://{}", c.domain)
         };
         // Fallback: if domain is empty, use a dummy host.
-        let uri = Uri::try_from(uri_str.as_str()).unwrap_or_else(|_| Uri::from_static("https://example.com"));
+        let uri = Uri::try_from(uri_str.as_str())
+            .unwrap_or_else(|_| Uri::from_static("https://example.com"));
 
         if let Ok(cookie) = Cookie::parse(set_cookie, &uri) {
             let _ = jar.insert(cookie, &uri);
@@ -103,7 +107,10 @@ fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolve
     jar.release();
 }
 
-pub fn build_flaresolverr_client(url: &str, flaresolverr_url: &str) -> Result<Agent, Box<dyn Error>> {
+pub fn build_flaresolverr_client(
+    url: &str,
+    flaresolverr_url: &str,
+) -> Result<Agent, Box<dyn Error>> {
     let payload = json!({
         "cmd": "request.get",
         "url": url,
@@ -128,11 +135,209 @@ pub fn build_flaresolverr_client(url: &str, flaresolverr_url: &str) -> Result<Ag
     Ok(agent)
 }
 
+/// Internal, mutable state wrapped by a Mutex.
+#[derive(Clone)]
+struct Inner {
+    agent: Agent,
+    flaresolverr_url: Option<String>,
+    session_id: Option<String>,
+    default_headers: Vec<(String, String)>,
+}
+
+/// Public handle that is Send + Sync.
+#[derive(Clone)]
+pub struct FlareClient {
+    inner: Arc<Mutex<Inner>>,
+}
+impl FlareClient {
+    /// Plain client (no FlareSolverr), safe default.
+    pub fn plain() -> Self {
+        FlareClient {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(Inner {
+                agent: build_ureq_agent(None),
+                flaresolverr_url: None,
+                session_id: None,
+                default_headers: vec![],
+            })),
+        }
+    }
+
+    /// Make this never error: on any failure, return a plain client.
+    pub fn from_env_or_plain(origin_url: &str) -> Self {
+        Self::from_env(origin_url).unwrap_or_else(|_| Self::plain())
+    }
+    
+    pub fn from_env(origin_url: &str) -> Result<Self> {
+        let flaresolverr_url = std::env::var("FLARESOLVERR_URL").ok();
+
+        // If FS not configured: plain agent, no headers.
+        if flaresolverr_url.is_none() {
+            return Ok(Self {
+                inner: Arc::new(Mutex::new(Inner {
+                    agent: build_ureq_agent(None),
+                    flaresolverr_url: None,
+                    session_id: None,
+                    default_headers: vec![],
+                })),
+            });
+        }
+        let flaresolverr_url = flaresolverr_url.unwrap();
+
+        // Optional session
+        let mut session_id = std::env::var("FLARESOLVERR_SESSION").ok();
+        if session_id.is_none() {
+            if let Ok(mut resp) = ureq::post(&flaresolverr_url)
+                .header("Content-Type", "application/json")
+                .send_json(&json!({"cmd":"sessions.create"}))
+            {
+                if let Ok(text) = resp.body_mut().read_to_string() {
+                    #[derive(serde::Deserialize)]
+                    struct Created {
+                        status: String,
+                        session: Option<String>,
+                    }
+                    if let Ok(Created { status, session }) = serde_json::from_str(&text) {
+                        if status == "ok" {
+                            session_id = session;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try initial solve; on failure fall back to plain agent.
+        let (agent, default_headers) =
+            match solve_with_flaresolverr(&flaresolverr_url, origin_url, session_id.as_deref()) {
+                Ok(solved) => {
+                    let a = build_ureq_agent(Some(&solved.user_agent));
+                    insert_flaresolverr_cookies_into_agent(&a, solved.cookies);
+                    (a, solved.headers)
+                }
+                Err(_) => (build_ureq_agent(None), vec![]),
+            };
+
+        Ok(Self {
+            inner: Arc::new(Mutex::new(Inner {
+                agent,
+                flaresolverr_url: Some(flaresolverr_url),
+                session_id,
+                default_headers,
+            })),
+        })
+    }
+
+    /// Thread-safe: takes &self. Internally locks, mutates as needed.
+    pub fn fetch_text(&self, url: &str) -> Result<String> {
+        // Fast path: copy FS config to avoid holding the lock during network I/O
+        let (fs_url_opt, session_id_opt, default_headers) = {
+            let guard = self.inner.lock().unwrap();
+            (
+                guard.flaresolverr_url.clone(),
+                guard.session_id.clone(),
+                guard.default_headers.clone(),
+            )
+        };
+
+        // If FS configured, try it first.
+        if let Some(fs_url) = fs_url_opt {
+            match proxy_fetch_text(&fs_url, session_id_opt.as_deref(), url) {
+                Ok(text) => return Ok(text),
+                Err(_e) => {
+                    // fall through to direct
+                }
+            }
+        }
+
+        // Direct GET using current agent + headers
+        direct_get_with_headers(self, url, &default_headers)
+    }
+}
+
+fn proxy_fetch_text(fs_url: &str, session_id: Option<&str>, url: &str) -> Result<String> {
+    let payload = match session_id {
+        Some(sid) => json!({"cmd":"request.get","url":url,"maxTimeout":60000,"session":sid}),
+        None => json!({"cmd":"request.get","url":url,"maxTimeout":60000}),
+    };
+
+    let mut resp = ureq::post(fs_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = resp.body_mut().read_to_string()?;
+    let body: FlareSolverrResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!("FlareSolverr error: {}", body.message));
+    }
+    Ok(body.solution.response)
+}
+
+fn direct_get_with_headers(
+    client: &FlareClient,
+    url: &str,
+    default_headers: &[(String, String)],
+) -> Result<String> {
+    // Build the request with headers on the fly; only need read access for agent
+    let agent = {
+        let guard = client.inner.lock().unwrap();
+        guard.agent.clone()
+    };
+
+    let req = default_headers
+        .iter()
+        .fold(agent.get(url), |req, (k, v)| req.header(k, v));
+    let mut resp = req.call()?;
+    Ok(resp.body_mut().read_to_string()?)
+}
+
+struct Solved {
+    user_agent: String,
+    cookies: Vec<FlareSolverrCookie>,
+    headers: Vec<(String, String)>,
+}
+
+fn solve_with_flaresolverr(
+    flaresolverr_url: &str,
+    url: &str,
+    session: Option<&str>,
+) -> Result<Solved> {
+    let payload = match session {
+        Some(sid) => json!({"cmd":"request.get","url":url,"maxTimeout":60000,"session":sid}),
+        None => json!({"cmd":"request.get","url":url,"maxTimeout":60000}),
+    };
+
+    let mut response = ureq::post(flaresolverr_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = response.body_mut().read_to_string()?;
+    let body: FlareSolverrResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!("FlareSolverr error: {}", body.message));
+    }
+
+    let mut hdrs: Vec<(String, String)> = vec![];
+    if let Some(obj) = body.solution.headers.as_object() {
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                if !k.eq_ignore_ascii_case("set-cookie") {
+                    hdrs.push((k.to_string(), s.to_string()));
+                }
+            } else {
+                hdrs.push((k.to_string(), v.to_string()));
+            }
+        }
+    }
+
+    Ok(Solved {
+        user_agent: body.solution.userAgent.clone(),
+        cookies: body.solution.cookies,
+        headers: hdrs,
+    })
+}
+
 #[cfg(test)]
 mod test {
-    use std::env;
     use super::*;
     use serde_json::json;
+    use std::env;
 
     fn get_flaresolverr_response(url: &str, flaresolverr_url: &str) -> FlareSolverrResponse {
         let payload = json!({

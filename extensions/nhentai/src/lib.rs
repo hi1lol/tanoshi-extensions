@@ -5,7 +5,6 @@ use lazy_static::lazy_static;
 use networking::FlareClient;
 use scraper::{Html, Selector};
 use std::env;
-use std::sync::RwLock;
 use tanoshi_lib::prelude::{
     ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar,
 };
@@ -84,21 +83,14 @@ lazy_static! {
 
 pub struct NHentai {
     preferences: Vec<Input>,
-    net: RwLock<FlareClient>,
+    net: FlareClient,
 }
 
 impl Default for NHentai {
     fn default() -> Self {
-        let fc = FlareClient::from_env(URL).unwrap_or_else(|_| FlareClient {
-            agent: networking::build_ureq_agent(None),
-            flaresolverr_url: std::env::var("FLARESOLVERR_URL").ok(),
-            session_id: std::env::var("FLARESOLVERR_SESSION").ok(),
-            default_headers: vec![],
-        });
-
         Self {
             preferences: PREFERENCES.clone(),
-            net: RwLock::new(fc),
+            net: FlareClient::from_env_or_plain(URL),
         }
     }
 }
@@ -112,7 +104,7 @@ fn nh_field_key(ui_label: &str) -> &'static str {
         "Groups" => "group",
         "Categories" => "category",
         "Parodies" => "parody",
-        _ => "tag", // fallback, but you could return the lowercase of label if you prefer
+        _ => "tag",
     }
 }
 
@@ -130,14 +122,19 @@ impl NHentai {
         for pref in self.preferences.iter() {
             if LANGUAGE_SELECT.eq(pref) {
                 if let Input::Select { state, values, .. } = pref {
-                    if let Some(InputType::String(lang)) = state.and_then(|i| values.get(i as usize)) {
+                    if let Some(InputType::String(lang)) =
+                        state.and_then(|i| values.get(i as usize))
+                    {
                         if lang != "Any" {
                             query.push(format!("language:{}", lang.to_lowercase()));
                         }
                     }
                 }
             } else if BLACKLIST_TAG.eq(pref) {
-                if let Input::Text { state: Some(state), .. } = pref {
+                if let Input::Text {
+                    state: Some(state), ..
+                } = pref
+                {
                     for tag in state.split(',') {
                         let t = norm_value(tag);
                         if !t.is_empty() {
@@ -152,25 +149,43 @@ impl NHentai {
         if let Some(filters) = filters {
             for filter in filters {
                 match filter {
-                    Input::Text { name, state: Some(state), .. } if name == TAG_FILTER.name() => {
+                    Input::Text {
+                        name,
+                        state: Some(state),
+                        ..
+                    } if name == TAG_FILTER.name() => {
                         let key = nh_field_key(&name);
                         for raw in state.split(',') {
                             let raw = raw.trim();
-                            if raw.is_empty() { continue; }
+                            if raw.is_empty() {
+                                continue;
+                            }
                             let neg = raw.starts_with('-');
                             let term = norm_value(raw.trim_start_matches('-'));
-                            if neg { query.push(format!("-{key}:{term}")); }
-                            else   { query.push(format!("{key}:{term}"));  }
+                            if neg {
+                                query.push(format!("-{key}:{term}"));
+                            } else {
+                                query.push(format!("{key}:{term}"));
+                            }
                         }
                     }
-                    Input::Text { name, state: Some(state), .. } => {
+                    Input::Text {
+                        name,
+                        state: Some(state),
+                        ..
+                    } => {
                         let key = nh_field_key(&name);
                         let term = norm_value(&state);
                         if !term.is_empty() {
                             query.push(format!("{key}:{term}"));
                         }
                     }
-                    Input::Select { name, values, state, .. } if name == SORT_FILTER.name() => {
+                    Input::Select {
+                        name,
+                        values,
+                        state,
+                        ..
+                    } if name == SORT_FILTER.name() => {
                         let idx = state.unwrap_or(0) as usize;
                         if let Some(InputType::String(v)) = values.get(idx) {
                             sort = Some(v.replace(' ', "-").to_lowercase()); // e.g., popular-week
@@ -181,15 +196,17 @@ impl NHentai {
             }
         }
 
-        let q = if query.is_empty() { r#""""#.to_string() } else { query.join(" ") };
+        let q = if query.is_empty() {
+            r#""""#.to_string()
+        } else {
+            query.join(" ")
+        };
         (q, sort)
     }
 
     fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
         let res = self
             .net
-            .write()
-            .unwrap()
             .fetch_text(url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -293,7 +310,7 @@ impl Extension for NHentai {
             let q = encode(&q_raw);
             match sort {
                 Some(s) => format!("{URL}/search/?q={q}&sort={s}&page={page}"),
-                None    => format!("{URL}/search/?q={q}&page={page}"),
+                None => format!("{URL}/search/?q={q}&page={page}"),
             }
         } else if let Some(query) = query {
             let q = encode(&query);
@@ -309,8 +326,6 @@ impl Extension for NHentai {
         // Send the request and get the response as a string
         let res = self
             .net
-            .write()
-            .unwrap()
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -438,8 +453,6 @@ impl Extension for NHentai {
         // Send the request and get the response as a string
         let res = self
             .net
-            .write()
-            .unwrap()
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -480,8 +493,6 @@ impl Extension for NHentai {
 
         let res = self
             .net
-            .write()
-            .unwrap()
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 

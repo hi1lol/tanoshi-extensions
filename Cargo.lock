@@ -746,6 +746,7 @@ dependencies = [
 name = "networking"
 version = "0.0.0"
 dependencies = [
+ "anyhow",
  "cookie",
  "cookie_store",
  "serde",

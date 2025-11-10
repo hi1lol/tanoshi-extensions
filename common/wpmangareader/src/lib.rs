@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use chrono::{NaiveDateTime, Utc};
+use networking::Agent;
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
-use networking::Agent;
 
 fn get_data_src(el: &ElementRef) -> Option<String> {
     el.value()
@@ -14,7 +14,6 @@ fn get_data_src(el: &ElementRef) -> Option<String> {
 
 pub fn parse_manga_list(url: &str, source_id: i64, body: &str) -> Result<Vec<MangaInfo>> {
     let mut manga = vec![];
-
     let doc = Html::parse_document(body);
 
     let selector = Selector::parse(".utao .uta .imgu, .listupd .bs .bsx, .listo .bs .bsx")
@@ -23,7 +22,6 @@ pub fn parse_manga_list(url: &str, source_id: i64, body: &str) -> Result<Vec<Man
     for el in doc.select(&selector) {
         let selector_name =
             Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
         let selector_img =
             Selector::parse("img").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
@@ -57,50 +55,69 @@ pub fn parse_manga_list(url: &str, source_id: i64, body: &str) -> Result<Vec<Man
     Ok(manga)
 }
 
-pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
-    let body = client.get(&format!("{}/manga/?page={}&order=latest", url, page))
-        .set("Referer", url)
-        .call()?
-        .into_string()?;
-
+pub fn get_latest_manga(
+    url: &str,
+    source_id: i64,
+    page: i64,
+    client: &Agent,
+) -> Result<Vec<MangaInfo>> {
+    let mut resp = client
+        .get(&format!("{}/manga/?page={}&order=latest", url, page))
+        .header("Referer", url)
+        .call()?;
+    let body = resp.body_mut().read_to_string()?;
     parse_manga_list(url, source_id, &body)
 }
 
-pub fn get_popular_manga(url: &str, source_id: i64, page: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
-    let body = client.get(&format!("{}/manga/?page={}&order=popular", url, page))
-        .set("Referer", url)
-        .call()?
-        .into_string()?;
-
+pub fn get_popular_manga(
+    url: &str,
+    source_id: i64,
+    page: i64,
+    client: &Agent,
+) -> Result<Vec<MangaInfo>> {
+    let mut resp = client
+        .get(&format!("{}/manga/?page={}&order=popular", url, page))
+        .header("Referer", url)
+        .call()?;
+    let body = resp.body_mut().read_to_string()?;
     parse_manga_list(url, source_id, &body)
 }
 
-pub fn search_manga(url: &str, source_id: i64, page: i64, query: &str, client: &Agent) -> Result<Vec<MangaInfo>> {
-    let body = client.get(&format!("{}/page/{}/?s={}", url, page, query))
-        .set("Referer", url)
-        .call()?
-        .into_string()?;
-
+pub fn search_manga(
+    url: &str,
+    source_id: i64,
+    page: i64,
+    query: &str,
+    client: &Agent,
+) -> Result<Vec<MangaInfo>> {
+    let mut resp = client
+        .get(&format!("{}/page/{}/?s={}", url, page, query))
+        .header("Referer", url)
+        .call()?;
+    let body = resp.body_mut().read_to_string()?;
     parse_manga_list(url, source_id, &body)
 }
 
-pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<MangaInfo> {
-    let body = client.get(&format!("{}{}", url, path))
-        .set("Referer", url)
-        .call()?
-        .into_string()?;
+pub fn get_manga_detail(
+    url: &str,
+    path: &str,
+    source_id: i64,
+    client: &Agent,
+) -> Result<MangaInfo> {
+    let mut resp = client
+        .get(&format!("{}{}", url, path))
+        .header("Referer", url)
+        .call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 
     let selector_name = Selector::parse(r#"h1.entry-title"#)
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
     let selector_img = Selector::parse(".infomanga > div[itemprop=image] img, .thumb img")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
     let selector_genre = Selector::parse(r#"div.gnr a, .mgen a, .seriestugenre a"#)
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
     let selector_desc = Selector::parse(".desc, .entry-content[itemprop=description]")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
@@ -137,24 +154,27 @@ pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -
     })
 }
 
-pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<Vec<ChapterInfo>> {
-    let body = client.get(&format!("{}{}", url, path))
-        .set("Referer", url)
-        .set("X-Requested-With", "XMLHttpRequest")
-        .call()?
-        .into_string()?;
+pub fn get_chapters(
+    url: &str,
+    path: &str,
+    source_id: i64,
+    client: &Agent,
+) -> Result<Vec<ChapterInfo>> {
+    let mut resp = client
+        .get(&format!("{}{}", url, path))
+        .header("Referer", url)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 
     let selector = Selector::parse(r#"div.bxcl li, #chapterlist li .eph-num a"#)
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
     let selector_chapter_name = Selector::parse(r#".lch a, .chapternum"#)
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
     let selector_chapter_time = Selector::parse(r#".chapterdate"#)
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
     let selector_chapter_url =
         Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
@@ -174,6 +194,13 @@ pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Re
                 .collect::<Vec<&str>>()
                 .join("");
 
+            let uploaded = NaiveDateTime::parse_from_str(
+                &format!("{} 00:00", chapter_time.trim()),
+                "%B %d, %Y %H:%M",
+            )
+            .map(|dt| dt.and_utc().timestamp())
+            .unwrap_or_else(|_| Utc::now().timestamp());
+
             ChapterInfo {
                 source_id,
                 title: chapter_name.clone(),
@@ -190,12 +217,7 @@ pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Re
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or_default(),
                 scanlator: None,
-                uploaded: NaiveDateTime::parse_from_str(
-                    &format!("{} 00:00", chapter_time.trim()),
-                    "%B %d, %Y %H:%M",
-                )
-                .unwrap_or_else(|_| Utc::now().naive_utc())
-                .timestamp(),
+                uploaded,
             }
         })
         .collect();
@@ -203,11 +225,12 @@ pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Re
     Ok(chapters)
 }
 
-pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {   
-    let body = client.get(&format!("{}{}", url, path))
-        .set("Referer", url)
-        .call()?
-        .into_string()?;
+pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {
+    let mut resp = client
+        .get(&format!("{}{}", url, path))
+        .header("Referer", url)
+        .call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 

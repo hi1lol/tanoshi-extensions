@@ -2,15 +2,16 @@ mod dto;
 use std::collections::HashMap;
 
 use anyhow::Result;
+use serde_json;
 use tanoshi_lib::prelude::*;
 use networking::Agent;
 
 use crate::dto::{Detail, Series};
 
-pub fn get_manga_list(url: &str, source_id: i64, client: &Agent) -> Result<Vec<MangaInfo>> {   
-    let results: HashMap<String, Detail> = client.get(&format!("{}/api/get_all_series", url))
-        .call()?
-        .into_json()?;
+pub fn get_manga_list(url: &str, source_id: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
+    let mut resp = client.get(&format!("{}/api/get_all_series", url)).call()?;
+    let text = resp.body_mut().read_to_string()?;
+    let results: HashMap<String, Detail> = serde_json::from_str(&text)?;
 
     let mut manga: Vec<MangaInfo> = results
         .into_iter()
@@ -27,12 +28,13 @@ pub fn get_manga_list(url: &str, source_id: i64, client: &Agent) -> Result<Vec<M
         .collect();
 
     manga.sort_by(|a, b| a.title.cmp(&b.title));
-
     Ok(manga)
 }
 
 pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<MangaInfo> {
-    let series: Series = client.get(&format!("{}{}", url, path)).call()?.into_json()?;
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let text = resp.body_mut().read_to_string()?;
+    let series: Series = serde_json::from_str(&text)?;
 
     Ok(MangaInfo {
         source_id,
@@ -47,10 +49,11 @@ pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -
 }
 
 pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<Vec<ChapterInfo>> {
-    let series: Series = client.get(&format!("{}{}", url, path)).call()?.into_json()?;
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let text = resp.body_mut().read_to_string()?;
+    let series: Series = serde_json::from_str(&text)?;
 
     let mut chapters = vec![];
-
     for (number, chapter) in series.chapters {
         chapters.push(ChapterInfo {
             source_id,
@@ -73,11 +76,12 @@ pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Re
     Ok(chapters)
 }
 
-pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {   
+pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {
     let split: Vec<_> = path.rsplitn(2, '/').collect();
-    let series: Series = client.get(&format!("{}{}", url, split[1]))
-        .call()?
-        .into_json()?;
+
+    let mut resp = client.get(&format!("{}{}", url, split[1])).call()?;
+    let text = resp.body_mut().read_to_string()?;
+    let series: Series = serde_json::from_str(&text)?;
 
     let pages = series
         .chapters
@@ -100,7 +104,7 @@ pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {
                 })
                 .collect()
         })
-        .unwrap_or(vec![]);
+        .unwrap_or_else(|| vec![]);
 
     Ok(pages)
 }

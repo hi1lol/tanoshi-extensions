@@ -1,7 +1,7 @@
 [package]
-name = "mangakakalot"
-version = "0.3.1"
-edition = "2021"
+name = "isekaiscanmanga"
+version = "0.3.0"
+edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
@@ -9,6 +9,6 @@ crate-type = ["cdylib"]
 [dependencies]
 networking = { path = "../../common/networking" }
 tanoshi-lib = "0.27.0"
-mangakakalot-common = { path = "../../common/mangakakalot" }
+madara = { path = "../../common/madara" }
 anyhow = "1"
 lazy_static = "1"

@@ -1,13 +1,13 @@
 use anyhow::{anyhow, Result};
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
+use lazy_static::lazy_static;
+use networking::{build_flaresolverr_client, build_ureq_agent, Agent};
 use scraper::{Html, Selector};
+use std::env;
 use tanoshi_lib::prelude::{
     ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar,
 };
-use lazy_static::lazy_static;
-use networking::{Agent, build_ureq_agent, build_flaresolverr_client};
-use std::env;
 
 pub static ID: i64 = 6;
 pub static NAME: &str = "nhentai";
@@ -77,7 +77,6 @@ lazy_static! {
         name: "Blacklist Tag".to_string(),
         state: None
     };
-    
     static ref PREFERENCES: Vec<Input> = vec![LANGUAGE_SELECT.clone(), BLACKLIST_TAG.clone()];
 }
 
@@ -90,7 +89,7 @@ impl Default for NHentai {
     fn default() -> Self {
         let mut instance = Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None, None),
+            client: build_ureq_agent(None),
         };
 
         // If flaresolverr_url is set, build the client with it
@@ -183,12 +182,10 @@ impl NHentai {
         query_str
     }
 
-    fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {       
-        // Send the request and get the response as a string
-        let res = self.client.get(&url)
-            .call()?
-            .into_string()?;
-        
+    fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
+        let mut resp = self.client.get(url).call()?;
+        let res = resp.body_mut().read_to_string()?;
+
         let document = Html::parse_document(&res);
         let gallery_selector =
             Selector::parse(".gallery").map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
@@ -222,7 +219,7 @@ impl NHentai {
                 .map(|s| s.to_string())
                 .ok_or_else(|| anyhow!("title not found"))?;
 
-            let manga = MangaInfo {
+            manga_list.push(MangaInfo {
                 source_id: ID,
                 status: None,
                 title,
@@ -231,19 +228,14 @@ impl NHentai {
                 description: None,
                 path,
                 cover_url,
-            };
-
-            manga_list.push(manga);
+            });
         }
         Ok(manga_list)
     }
 }
 
 impl Extension for NHentai {
-    fn set_preferences(
-        &mut self,
-        preferences: Vec<Input>,
-    ) -> anyhow::Result<()> {
+    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
         for input in preferences {
             for pref in self.preferences.iter_mut() {
                 if input.eq(pref) {
@@ -302,9 +294,8 @@ impl Extension for NHentai {
     fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
         let url = format!("{}{}", URL, path);
         // Send the request and get the response as a string
-        let res = self.client.get(&url)
-            .call()?
-            .into_string()?;
+        let mut resp = self.client.get(&url).call()?;
+        let res = resp.body_mut().read_to_string()?;
 
         let document = Html::parse_document(&res);
         let gallery_id_selector = Selector::parse("h3[id=\"gallery_id\"]")
@@ -428,9 +419,8 @@ impl Extension for NHentai {
         let url = format!("{}{}", URL, path);
 
         // Send the request and get the response as a string
-        let res = self.client.get(&url)
-            .call()?
-            .into_string()?;
+        let mut resp = self.client.get(&url).call()?;
+        let res = resp.body_mut().read_to_string()?;
 
         let document = Html::parse_document(&res);
         let scanlator_selector = Selector::parse("a[href^=\"/group/\"] > .name")
@@ -447,7 +437,7 @@ impl Extension for NHentai {
                 .value()
                 .attr("datetime")
                 .and_then(|t| NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f%z").ok())
-                .map(|dt| dt.timestamp())
+                .map(|dt| dt.and_utc().timestamp())
         } else {
             None
         };
@@ -468,9 +458,8 @@ impl Extension for NHentai {
         let url = format!("{}{}", URL, path);
 
         // Send the request and get the response as a string
-        let res = self.client.get(&url)
-            .call()?
-            .into_string()?;
+        let mut resp = self.client.get(&url).call()?;
+        let res = resp.body_mut().read_to_string()?;
 
         let document = Html::parse_document(&res);
         let page_selector = Selector::parse(".thumb-container > .gallerythumb > img")
@@ -525,7 +514,7 @@ mod test {
         ];
 
         let mut nhentai: NHentai = NHentai::default();
-        
+
         nhentai.set_preferences(preferences).unwrap();
 
         nhentai

@@ -103,68 +103,77 @@ impl Default for NHentai {
     }
 }
 
+// add near the top
+fn nh_field_key(ui_label: &str) -> &'static str {
+    match ui_label {
+        "Tag" => "tag",
+        "Characters" => "character",
+        "Artists" => "artist",
+        "Groups" => "group",
+        "Categories" => "category",
+        "Parodies" => "parody",
+        _ => "tag", // fallback, but you could return the lowercase of label if you prefer
+    }
+}
+
+fn norm_value(v: &str) -> String {
+    // NH prefers underscores for multi-word tokens
+    v.trim().replace(' ', "_")
+}
 
 impl NHentai {
-    fn query(&self, filters: Option<Vec<Input>>) -> String {
-        let mut query = vec![];
-        let mut sort = None;
+    fn query_parts(&self, filters: Option<Vec<Input>>) -> (String, Option<String>) {
+        let mut query: Vec<String> = vec![];
+        let mut sort: Option<String> = None;
+
+        // preferences: language + global blacklist
         for pref in self.preferences.iter() {
             if LANGUAGE_SELECT.eq(pref) {
                 if let Input::Select { state, values, .. } = pref {
-                    if let Some(InputType::String(lang)) =
-                        state.and_then(|index| values.get(index as usize))
-                    {
+                    if let Some(InputType::String(lang)) = state.and_then(|i| values.get(i as usize)) {
                         if lang != "Any" {
                             query.push(format!("language:{}", lang.to_lowercase()));
                         }
                     }
                 }
             } else if BLACKLIST_TAG.eq(pref) {
-                if let Input::Text {
-                    state: Some(state), ..
-                } = pref
-                {
+                if let Input::Text { state: Some(state), .. } = pref {
                     for tag in state.split(',') {
-                        query.push(format!("-tag:{}", tag.trim()))
+                        let t = norm_value(tag);
+                        if !t.is_empty() {
+                            query.push(format!("-tag:{t}"));
+                        }
                     }
                 }
             }
         }
 
+        // filters
         if let Some(filters) = filters {
-            for filter in filters.iter() {
+            for filter in filters {
                 match filter {
-                    Input::Text {
-                        name,
-                        state: Some(state),
-                        ..
-                    } if name == &TAG_FILTER.name() => {
-                        for tag in state.split(',') {
-                            if tag.starts_with('-') {
-                                query.push(format!(
-                                    "-{}:{}",
-                                    name.to_lowercase(),
-                                    tag.trim().replace("-", "")
-                                ))
-                            } else {
-                                query.push(format!("{}:{}", name.to_lowercase(), tag.trim()))
-                            }
+                    Input::Text { name, state: Some(state), .. } if name == TAG_FILTER.name() => {
+                        let key = nh_field_key(&name);
+                        for raw in state.split(',') {
+                            let raw = raw.trim();
+                            if raw.is_empty() { continue; }
+                            let neg = raw.starts_with('-');
+                            let term = norm_value(raw.trim_start_matches('-'));
+                            if neg { query.push(format!("-{key}:{term}")); }
+                            else   { query.push(format!("{key}:{term}"));  }
                         }
                     }
-                    Input::Text {
-                        name,
-                        state: Some(state),
-                        ..
-                    } => query.push(format!("{}:{}", name.to_lowercase(), state.trim())),
-                    Input::Select {
-                        name,
-                        values,
-                        state,
-                        ..
-                    } if name == &SORT_FILTER.name() => {
-                        let state = state.unwrap_or(0);
-                        if let Some(InputType::String(state)) = values.get(state as usize) {
-                            sort = Some(format!("sort={}", state.replace(" ", "-").to_lowercase()));
+                    Input::Text { name, state: Some(state), .. } => {
+                        let key = nh_field_key(&name);
+                        let term = norm_value(&state);
+                        if !term.is_empty() {
+                            query.push(format!("{key}:{term}"));
+                        }
+                    }
+                    Input::Select { name, values, state, .. } if name == SORT_FILTER.name() => {
+                        let idx = state.unwrap_or(0) as usize;
+                        if let Some(InputType::String(v)) = values.get(idx) {
+                            sort = Some(v.replace(' ', "-").to_lowercase()); // e.g., popular-week
                         }
                     }
                     _ => {}
@@ -172,17 +181,8 @@ impl NHentai {
             }
         }
 
-        let mut query_str = if query.is_empty() {
-            r#""""#.to_string()
-        } else {
-            query.join(" ")
-        };
-
-        if let Some(sort) = sort {
-            query_str = format!("{query_str}&{sort}");
-        }
-
-        query_str
+        let q = if query.is_empty() { r#""""#.to_string() } else { query.join(" ") };
+        (q, sort)
     }
 
     fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
@@ -271,14 +271,14 @@ impl Extension for NHentai {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let binding = self.query(None);
-        let q = encode(&binding);
+        let (q, _) = self.query_parts(None);
+        let q = encode(&q);
         self.get_manga_list(&format!("{URL}/search/?q={q}&sort=popular&page={page}"))
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let binding = self.query(None);
-        let q = encode(&binding);
+        let (q, _) = self.query_parts(None);
+        let q = encode(&q);
         self.get_manga_list(&format!("{URL}/search/?q={q}&page={page}"))
     }
 
@@ -289,9 +289,12 @@ impl Extension for NHentai {
         filters: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
         let url = if let Some(filters) = filters {
-            let binding = self.query(Some(filters));
-            let q = encode(&binding);
-            format!("{URL}/search/?q={q}&page={page}")
+            let (q_raw, sort) = self.query_parts(Some(filters));
+            let q = encode(&q_raw);
+            match sort {
+                Some(s) => format!("{URL}/search/?q={q}&sort={s}&page={page}"),
+                None    => format!("{URL}/search/?q={q}&page={page}"),
+            }
         } else if let Some(query) = query {
             let q = encode(&query);
             format!("{URL}/search/?q={q}&sort=popular&page={page}")
@@ -598,7 +601,7 @@ mod test {
                 }
             } else if PARODIES_FILTER.eq(filter) {
                 if let Input::Text { state, .. } = filter {
-                    *state = Some("azur lane".to_string());
+                    *state = Some("azur-lane".to_string());
                 }
             }
         }

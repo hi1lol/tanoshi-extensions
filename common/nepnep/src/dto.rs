@@ -1,4 +1,4 @@
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use serde::de::Deserializer;
 use serde::de::{self, Unexpected};
 use serde::Deserialize;
@@ -60,15 +60,17 @@ struct DateOrZeroVisitor;
 impl<'de> de::Visitor<'de> for DateOrZeroVisitor {
     type Value = NaiveDateTime;
 
-    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-        formatter.write_str("an integer or a string")
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("an integer or a string")
     }
 
     fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
     where
         E: de::Error,
     {
-        Ok(NaiveDateTime::from_timestamp(v as i64, 0))
+        DateTime::<Utc>::from_timestamp(v as i64, 0)
+            .map(|dt| dt.naive_utc())
+            .ok_or_else(|| E::custom("invalid unix timestamp"))
     }
 
     fn visit_str<E>(self, v: &str) -> Result<Self::Value, E>

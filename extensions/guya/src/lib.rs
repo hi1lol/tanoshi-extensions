@@ -27,7 +27,7 @@ impl Default for Guya {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None, None),   
+            client: build_ureq_agent(None),
         }
     }
 }

@@ -1,11 +1,7 @@
-use cookie_store::CookieStore;
-use ureq::Cookie;
-use cookie::SameSite;
-use ureq::{json, serde_json, AgentBuilder};
+use cookie::time::OffsetDateTime as CookieOffsetDateTime;
+use serde_json::{json, Value as JsonValue};
 use std::error::Error;
-use url::Url;
-
-use time::OffsetDateTime;
+use ureq::{http::Uri, Cookie};
 
 pub type Agent = ureq::Agent;
 
@@ -27,7 +23,7 @@ pub struct FlareSolverrSolution {
     pub status: u16,
     pub cookies: Vec<FlareSolverrCookie>,
     pub userAgent: String,
-    pub headers: serde_json::Value,
+    pub headers: JsonValue,
     pub response: String,
 }
 
@@ -44,51 +40,68 @@ pub struct FlareSolverrCookie {
     pub value: String,
 }
 
-pub fn build_ureq_agent(user_agent: Option<&str>, store: Option<CookieStore>) -> Agent {
-    let builder = AgentBuilder::new()
-        .redirects(5)
-        .user_agent(user_agent.unwrap_or_default())
-        .cookie_store(store.unwrap_or_default());
-
-        
-    builder.build()
-}
-
-fn convert_flaresolverr_cookies_to_ureq_cookies(mut store: CookieStore, cookies: Vec<FlareSolverrCookie>) -> CookieStore {
-    for cookie in cookies {        
-        let same_site = match cookie.sameSite.as_str() {
-            "Strict" => SameSite::Strict,
-            "Lax" => SameSite::Lax,
-            "None" => SameSite::None,
-            _ => SameSite::None,
-        };
-
-        let mut cookie_builder = Cookie::build(cookie.name, cookie.value)
-            .domain(&cookie.domain)
-            .path(&cookie.path)
-            .http_only(cookie.httpOnly)
-            .secure(cookie.secure)
-            .path(&cookie.path)
-            .same_site(same_site);
-
-        if let Some(expiry) = cookie.expiry {
-            cookie_builder = cookie_builder.expires(OffsetDateTime::from_unix_timestamp(expiry as i64));
-        }
-
-        
-        let request_url = Url::parse(format!("https://{}", &cookie.domain).as_str()).unwrap();
-
-        let result = store.insert_raw(&cookie_builder.finish(), &request_url);
-
-        if let Err(e) = result {
-            eprintln!("Error inserting cookie: {}", e);
+pub fn build_ureq_agent(user_agent: Option<&str>) -> Agent {
+    let mut cfg = Agent::config_builder().max_redirects(5);
+    if let Some(ua) = user_agent {
+        if !ua.is_empty() {
+            cfg = cfg.user_agent(ua);
         }
     }
-
-    store
+    cfg.build().into()
 }
 
+fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolverrCookie>) {
+    let mut jar = agent.cookie_jar_lock();
+    for c in cookies {
+        let mut parts = vec![format!("{}={}", c.name, c.value)];
 
+        // Path
+        if !c.path.is_empty() {
+            parts.push(format!("Path={}", c.path));
+        }
+        // Domain
+        if !c.domain.is_empty() {
+            parts.push(format!("Domain={}", c.domain));
+        }
+        // Secure / HttpOnly
+        if c.secure {
+            parts.push("Secure".to_string());
+        }
+        if c.httpOnly {
+            parts.push("HttpOnly".to_string());
+        }
+        // SameSite
+        match c.sameSite.as_str() {
+            "Strict" | "Lax" | "None" => parts.push(format!("SameSite={}", c.sameSite)),
+            _ => {}
+        }
+        // Expires
+        if let Some(expiry) = c.expiry {
+            if let Ok(ts) = CookieOffsetDateTime::from_unix_timestamp(expiry as i64) {
+                let max_age = ts.unix_timestamp() - CookieOffsetDateTime::now_utc().unix_timestamp();
+                if max_age > 0 {
+                    parts.push(format!("Max-Age={}", max_age));
+                }
+            }
+        }
+
+        let set_cookie = parts.join("; ");
+
+        // Bind parse to a relevant URI (scheme/host are used for defaults)
+        let uri_str = if c.domain.starts_with("http://") || c.domain.starts_with("https://") {
+            c.domain.clone()
+        } else {
+            format!("https://{}", c.domain)
+        };
+        // Fallback: if domain is empty, use a dummy host.
+        let uri = Uri::try_from(uri_str.as_str()).unwrap_or_else(|_| Uri::from_static("https://example.com"));
+
+        if let Ok(cookie) = Cookie::parse(set_cookie, &uri) {
+            let _ = jar.insert(cookie, &uri);
+        }
+    }
+    jar.release();
+}
 
 pub fn build_flaresolverr_client(url: &str, flaresolverr_url: &str) -> Result<Agent, Box<dyn Error>> {
     let payload = json!({
@@ -97,20 +110,20 @@ pub fn build_flaresolverr_client(url: &str, flaresolverr_url: &str) -> Result<Ag
         "maxTimeout": 60000,
     });
 
-    let response = ureq::post(flaresolverr_url)
-        .set("Content-Type", "application/json")
-        .send_json(serde_json::to_value(payload)?)?;
+    let mut response = ureq::post(flaresolverr_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
 
-    // Deserialize and check for errors in the response
-    let body: FlareSolverrResponse = response.into_json()?;
+    let text = response.body_mut().read_to_string()?;
+    let body: FlareSolverrResponse = serde_json::from_str(&text)?;
     if body.status != "ok" {
         return Err(format!("FlareSolverr error: {}", body.message).into());
     }
 
     let user_agent = body.solution.userAgent.clone();
-    let store = convert_flaresolverr_cookies_to_ureq_cookies(CookieStore::default(), body.solution.cookies);
+    let agent = build_ureq_agent(Some(&user_agent));
 
-    let agent = build_ureq_agent(Some(&user_agent), Some(store));
+    insert_flaresolverr_cookies_into_agent(&agent, body.solution.cookies);
 
     Ok(agent)
 }
@@ -118,11 +131,10 @@ pub fn build_flaresolverr_client(url: &str, flaresolverr_url: &str) -> Result<Ag
 #[cfg(test)]
 mod test {
     use std::env;
-
     use super::*;
+    use serde_json::json;
 
     fn get_flaresolverr_response(url: &str, flaresolverr_url: &str) -> FlareSolverrResponse {
-
         let payload = json!({
             "cmd": "request.get",
             "url": url,
@@ -130,38 +142,33 @@ mod test {
         });
 
         let flare_response = ureq::post(flaresolverr_url)
-            .set("Content-Type", "application/json")
-            .send_json(serde_json::to_value(payload).unwrap());
+            .header("Content-Type", "application/json")
+            .send_json(&payload);
 
         assert!(flare_response.is_ok());
-
-        let flare_body: FlareSolverrResponse = flare_response.unwrap().into_json().unwrap();
-
-        flare_body
+        let mut resp = flare_response.unwrap();
+        let text = resp.body_mut().read_to_string().unwrap();
+        serde_json::from_str::<FlareSolverrResponse>(&text).unwrap()
     }
 
     fn get_ureq_response(url: &str, flaresolverr_url: &str) -> String {
         let client = build_flaresolverr_client(url, flaresolverr_url).unwrap();
+        let resp = client.get(url).call();
 
-        let ureq_call = client.get(url);
-
-        let ureq_response = ureq_call.call(); 
-
-        if let Err(e) = &ureq_response {
+        if let Err(e) = &resp {
             eprintln!("Error making request: {}", e);
         }
 
-        assert!(ureq_response.is_ok());
-
-        let ureq_body = ureq_response.unwrap().into_string().unwrap();
-
-        ureq_body
+        assert!(resp.is_ok());
+        let mut r = resp.unwrap();
+        r.body_mut().read_to_string().unwrap()
     }
 
     #[test]
     #[ignore]
     fn test_nowsecure() {
-        let flaresolverr_url = env::var("FLARESOLVERR_URL").unwrap_or_else(|_| "http://localhost:8191/v1".to_string());
+        let flaresolverr_url =
+            env::var("FLARESOLVERR_URL").unwrap_or_else(|_| "http://localhost:8191/v1".to_string());
 
         let flare_body = get_flaresolverr_response("https://nowsecure.com", &flaresolverr_url);
         assert!(!flare_body.solution.response.is_empty());
@@ -173,7 +180,8 @@ mod test {
     #[test]
     #[ignore]
     fn test_openai() {
-        let flaresolverr_url = env::var("FLARESOLVERR_URL").unwrap_or_else(|_| "http://localhost:8191/v1".to_string());
+        let flaresolverr_url =
+            env::var("FLARESOLVERR_URL").unwrap_or_else(|_| "http://localhost:8191/v1".to_string());
 
         let flare_body = get_flaresolverr_response("https://openai.com", &flaresolverr_url);
         assert!(!flare_body.solution.response.is_empty());
@@ -181,5 +189,4 @@ mod test {
         let ureq_body = get_ureq_response("https://openai.com", &flaresolverr_url);
         assert!(!ureq_body.is_empty());
     }
-    
 }

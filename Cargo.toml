@@ -2,6 +2,7 @@
 members = ["extensions/*", "common/*"]
 exclude = [
     "extensions/dead",
+    "common/dead",
 ]
 
 [profile.release]

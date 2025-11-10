@@ -31,7 +31,7 @@ impl Default for ThreeSixtyFiveManga {
     fn default() -> Self {
         let mut instance = Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None, None),
+            client: build_ureq_agent(None),
             
         };
 

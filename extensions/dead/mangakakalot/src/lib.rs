@@ -1,11 +1,11 @@
 use anyhow::bail;
+use lazy_static::lazy_static;
 use mangakakalot_common::{
     get_chapters, get_manga_detail, get_pages, parse_manga_list, parse_search_manga_list,
 };
-use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar, SourceInfo};
-use lazy_static::lazy_static;
-use networking::{Agent, build_ureq_agent};
+use networking::{build_ureq_agent, Agent};
 use std::env;
+use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar, SourceInfo};
 
 tanoshi_lib::export_plugin!(register);
 
@@ -30,16 +30,13 @@ impl Default for Mangakakalot {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None, None),
+            client: build_ureq_agent(None),
         }
     }
 }
 
 impl Extension for Mangakakalot {
-    fn set_preferences(
-        &mut self,
-        preferences: Vec<Input>,
-    ) -> anyhow::Result<()> {
+    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
         for input in preferences {
             for pref in self.preferences.iter_mut() {
                 if input.eq(pref) {
@@ -47,7 +44,6 @@ impl Extension for Mangakakalot {
                 }
             }
         }
-
         Ok(())
     }
 
@@ -55,7 +51,7 @@ impl Extension for Mangakakalot {
         Ok(self.preferences.clone())
     }
 
-    fn get_source_info(&self) -> tanoshi_lib::prelude::SourceInfo {
+    fn get_source_info(&self) -> SourceInfo {
         SourceInfo {
             id: ID,
             name: NAME.to_string(),
@@ -68,20 +64,24 @@ impl Extension for Mangakakalot {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let body = self.client.get(&format!(
-            "{URL}/manga_list?type=topview&category=all&state=all&page={page}",
-        ))
-        .call()?
-        .into_string()?;
+        let mut resp = self
+            .client
+            .get(&format!(
+                "{URL}/manga_list?type=topview&category=all&state=all&page={page}",
+            ))
+            .call()?;
+        let body = resp.body_mut().read_to_string()?;
         parse_manga_list(ID, &body, ".list-truyen-item-wrap")
     }
 
-    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {        
-        let body = self.client.get(&format!(
-            "{URL}/manga_list?type=latest&category=all&state=all&page={page}",
-        ))
-        .call()?
-        .into_string()?;
+    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        let mut resp = self
+            .client
+            .get(&format!(
+                "{URL}/manga_list?type=latest&category=all&state=all&page={page}",
+            ))
+            .call()?;
+        let body = resp.body_mut().read_to_string()?;
         parse_manga_list(ID, &body, ".list-truyen-item-wrap")
     }
 
@@ -90,14 +90,16 @@ impl Extension for Mangakakalot {
         page: i64,
         query: Option<String>,
         _: Option<Vec<Input>>,
-    ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {       
+    ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
         if let Some(query) = query {
-            let body = self.client.get(&format!(
-                "{URL}/search/story/{}?page={page}",
-                query.replace(" ", "_").to_lowercase()
-            ))
-            .call()?
-            .into_string()?;
+            let mut resp = self
+                .client
+                .get(&format!(
+                    "{URL}/search/story/{}?page={page}",
+                    query.replace(' ', "_").to_lowercase()
+                ))
+                .call()?;
+            let body = resp.body_mut().read_to_string()?;
             parse_search_manga_list(ID, &body, "div.story_item")
         } else {
             bail!("query can not be empty")
@@ -112,10 +114,12 @@ impl Extension for Mangakakalot {
         get_chapters(&path, ID, &self.client)
     }
 
-    fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {        
-        let body = self.client.get(&format!("https://chapmanganato.com{path}"))
-            .call()?
-            .into_string()?;
+    fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+        let mut resp = self
+            .client
+            .get(&format!("https://chapmanganato.com{path}"))
+            .call()?;
+        let body = resp.body_mut().read_to_string()?;
         get_pages(&body)
     }
 }
@@ -194,7 +198,6 @@ mod test {
 
         let res = source.get_chapters("/manga-hs951953".to_string()).unwrap();
         assert!(!res.is_empty());
-        // println!("{res:?}");
     }
 
     #[test]

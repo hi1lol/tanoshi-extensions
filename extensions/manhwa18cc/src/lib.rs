@@ -29,7 +29,7 @@ impl Default for Manhwa18cc {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None, None),
+            client: build_ureq_agent(None),
         }
     }
 }   
@@ -67,9 +67,9 @@ impl Extension for Manhwa18cc {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let body = self.client.get(&format!("{}/webtoons/{}?orderby=latest", URL, page)) 
-            .call()?
-            .into_string()?;
+        let mut res = self.client.get(&format!("{}/webtoons/{}?orderby=latest", URL, page)) 
+            .call()?;
+        let body = res.body_mut().read_to_string()?;
 
         let selector = Selector::parse(".manga-item")
             .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -78,9 +78,9 @@ impl Extension for Manhwa18cc {
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let body = self.client.get(&format!("{}/webtoons/{}?orderby=latest", URL, page))
-            .call()?
-            .into_string()?;
+        let mut res = self.client.get(&format!("{}/webtoons/{}?orderby=latest", URL, page))
+            .call()?;
+        let body = res.body_mut().read_to_string()?;
 
         let selector = Selector::parse(".manga-item")
             .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -110,9 +110,9 @@ impl Extension for Manhwa18cc {
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
-        let body = self.client.get(&format!("{}{}", URL, path)) 
-            .call()?
-            .into_string()?;
+        let mut res = self.client.get(&format!("{}{}", URL, path)) 
+            .call()?;
+        let body = res.body_mut().read_to_string()?;
 
         let doc = Html::parse_document(&body);
 

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use chrono::NaiveDateTime;
+use chrono::{DateTime, NaiveDateTime, Utc};
 use fancy_regex::Regex;
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
@@ -84,9 +84,8 @@ pub fn parse_search_manga_list(
 }
 
 pub fn get_manga_detail(path: &str, source_id: i64, client: &Agent) -> Result<MangaInfo> {
-    let body = client.get(&format!("{URL}{path}"))
-        .call()?
-        .into_string()?;
+    let mut resp = client.get(&format!("{URL}{path}")).call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 
@@ -124,10 +123,7 @@ pub fn get_manga_detail(path: &str, source_id: i64, client: &Agent) -> Result<Ma
         status: None,
         description: doc.select(&selector_desc).next().map(|el| {
             let text = el.inner_html().trim().to_owned();
-            // .replace(r#"<div id="panel-story-info-description" class="panel-story-info-description">"#, "")
-            // .replace(r#"</div>"#, "")
-            // .replace(r#"<h3>Description :</h3>"#, "");
-            html2text::from_read(text.as_bytes(), 1000).replace("### Description :\n\n", "")
+            html2text::from_read(text.as_bytes(), 1000).expect("Failed to convert HTML to text").replace("### Description :\n\n", "")
         }),
         path: path.to_string(),
         cover_url: doc
@@ -139,9 +135,8 @@ pub fn get_manga_detail(path: &str, source_id: i64, client: &Agent) -> Result<Ma
 }
 
 pub fn get_chapters(path: &str, source_id: i64, client: &Agent) -> Result<Vec<ChapterInfo>> {
-    let body = client.get(&format!("{URL}{path}"))
-        .call()?
-        .into_string()?;
+    let mut resp = client.get(&format!("{URL}{path}")).call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 
@@ -169,13 +164,17 @@ pub fn get_chapters(path: &str, source_id: i64, client: &Agent) -> Result<Vec<Ch
             .next()
             .and_then(|el| el.value().attr("title"))
             .map(|title| title.to_string())
-            .unwrap_or_else(|| "".to_string());
+            .unwrap_or_default();
 
         let number = chapter_re
             .captures(&chapter_name)?
             .and_then(|cap| cap.get(1))
             .map(|num| num.as_str().to_string())
             .unwrap_or_default();
+
+        let uploaded = NaiveDateTime::parse_from_str(&chapter_time, "%b %d,%Y %H:%M")
+            .map(|dt| dt.and_utc().timestamp())
+            .unwrap_or_else(|_| DateTime::<Utc>::from_timestamp(0, 0).unwrap().timestamp());
 
         chapters.push(ChapterInfo {
             source_id,
@@ -193,9 +192,7 @@ pub fn get_chapters(path: &str, source_id: i64, client: &Agent) -> Result<Vec<Ch
                 .join(""),
             number: number.parse().unwrap_or_default(),
             scanlator: None,
-            uploaded: NaiveDateTime::parse_from_str(&chapter_time, "%b %d,%Y %H:%M")
-                .unwrap_or_else(|_| NaiveDateTime::from_timestamp(0, 0))
-                .timestamp(),
+            uploaded,
         });
     }
 

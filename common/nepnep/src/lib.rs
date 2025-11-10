@@ -4,9 +4,9 @@ use std::collections::HashSet;
 
 use anyhow::{anyhow, bail, Result};
 use fancy_regex::Regex;
+use networking::Agent;
 use scraper::{Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, Input, InputType, MangaInfo, TriState};
-use networking::Agent;
 
 use crate::dto::{CurChapter, Dir, DirChapter};
 
@@ -217,9 +217,8 @@ pub fn get_filter_list() -> Vec<Input> {
 }
 
 pub fn get_all_manga(url: &str, client: &Agent) -> Result<Vec<Dir>> {
-    let html = client.get(&format!("{}/search", url))
-        .call()?
-        .into_string()?;
+    let mut resp = client.get(&format!("{}/search", url)).call()?;
+    let html = resp.body_mut().read_to_string()?;
     let start_index = html
         .find("vm.Directory =")
         .ok_or_else(|| anyhow!("vm.Directory not found"))?;
@@ -269,7 +268,12 @@ fn sort_year_released(dirs: &mut Vec<Dir>, asc: bool) {
     });
 }
 
-pub fn get_popular_manga(source_id: i64, url: &str, mut page: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
+pub fn get_popular_manga(
+    source_id: i64,
+    url: &str,
+    mut page: i64,
+    client: &Agent,
+) -> Result<Vec<MangaInfo>> {
     if page < 1 {
         page = 1;
     }
@@ -290,7 +294,12 @@ pub fn get_popular_manga(source_id: i64, url: &str, mut page: i64, client: &Agen
     Ok(manga)
 }
 
-pub fn get_latest_manga(source_id: i64, url: &str, mut page: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
+pub fn get_latest_manga(
+    source_id: i64,
+    url: &str,
+    mut page: i64,
+    client: &Agent,
+) -> Result<Vec<MangaInfo>> {
     if page < 1 {
         page = 1;
     }
@@ -331,7 +340,6 @@ fn filter_genre(dirs: &mut Vec<Dir>, genres: &[Input]) {
                     has += 1
                 }
             }
-
             has == included_genres.len() as i32
         });
     }
@@ -354,7 +362,6 @@ fn filter_genre(dirs: &mut Vec<Dir>, genres: &[Input]) {
                     return false;
                 }
             }
-
             true
         });
     }
@@ -392,7 +399,6 @@ pub fn search_manga(
 
     if let Some(filters) = filters {
         for filter in filters.iter() {
-            println!("filter: {:?}", filter);
             match filter {
                 Input::Text {
                     name,
@@ -454,10 +460,14 @@ pub fn search_manga(
     Ok(manga)
 }
 
-pub fn get_manga_detail(source_id: i64, url: &str, path: String, client: &Agent) -> Result<MangaInfo> {
-    let body = client.get(&format!("{}{}", url, path))
-        .call()?
-        .into_string()?;
+pub fn get_manga_detail(
+    source_id: i64,
+    url: &str,
+    path: String,
+    client: &Agent,
+) -> Result<MangaInfo> {
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let body = resp.body_mut().read_to_string()?;
     let doc = Html::parse_document(&body);
 
     let title = doc
@@ -545,10 +555,14 @@ fn get_ch_dirs(vm_dir: &str, index_name: &str) -> Result<Vec<DirChapter>> {
         .collect())
 }
 
-pub fn get_chapters(source_id: i64, url: &str, path: String, client: &Agent) -> Result<Vec<ChapterInfo>> {
-    let body = client.get(&format!("{}{}", url, path))
-        .call()?
-        .into_string()?;
+pub fn get_chapters(
+    source_id: i64,
+    url: &str,
+    path: String,
+    client: &Agent,
+) -> Result<Vec<ChapterInfo>> {
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let body = resp.body_mut().read_to_string()?;
     let index_name = get_index_name(&body)?;
     let vm_dir = get_vm_dir(&body)?;
     let ch_dirs = get_ch_dirs(&vm_dir, &index_name)?;
@@ -557,16 +571,6 @@ pub fn get_chapters(source_id: i64, url: &str, path: String, client: &Agent) -> 
     for ch in ch_dirs.iter() {
         let mut chapter = ch.chapter.clone();
         let t = chapter.remove(0);
-
-        /*
-        vm.ChapterURLEncode = function(e) {
-            Index = "";
-            var t = e.substring(0,1);
-            1 != t && (Index = "-index-" + t);
-            var n = parseInt(e.slice(1,-1)), m = "", a = e[e.length-1]
-            return 0 != a && (m = "." + a),"-chapter-" + n + m + Index + vm.PageOne + ".html"
-        }
-        */
 
         let index = if t != '1' {
             format!("-index-{}", t)
@@ -581,7 +585,7 @@ pub fn get_chapters(source_id: i64, url: &str, path: String, client: &Agent) -> 
             source_id,
             title: format!("{} {}", ch.type_field, number.to_string()),
             path: format!("/read-online/{index_name}-chapter-{number}{index}.html"),
-            uploaded: ch.date.timestamp(),
+            uploaded: ch.date.and_utc().timestamp(),
             number,
             scanlator: None,
         })
@@ -590,10 +594,9 @@ pub fn get_chapters(source_id: i64, url: &str, path: String, client: &Agent) -> 
     Ok(chapters)
 }
 
-pub fn get_pages(url: &str, path: String, client: &Agent) -> Result<Vec<String>> {   
-    let body = client.get(&format!("{}{}", url, path))
-        .call()?
-        .into_string()?;
+pub fn get_pages(url: &str, path: String, client: &Agent) -> Result<Vec<String>> {
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let body = resp.body_mut().read_to_string()?;
     let index_name = get_index_name(&body)?;
     let cur_chapter = {
         let mat = Regex::new(r"(?<=vm\.CurChapter = ){.*}(?=;)")?
@@ -608,12 +611,10 @@ pub fn get_pages(url: &str, path: String, client: &Agent) -> Result<Vec<String>>
         .ok_or_else(|| anyhow!("regext not found anything"))?
         .as_str()
         .to_string();
-    let directory = {
-        if cur_chapter.directory.is_empty() {
-            "".to_string()
-        } else {
-            format!("{}/", cur_chapter.directory)
-        }
+    let directory = if cur_chapter.directory.is_empty() {
+        "".to_string()
+    } else {
+        format!("{}/", cur_chapter.directory)
     };
     let chapter_image = {
         let chapter = cur_chapter.chapter[1..cur_chapter.chapter.len() - 1].to_string();
@@ -627,12 +628,9 @@ pub fn get_pages(url: &str, path: String, client: &Agent) -> Result<Vec<String>>
 
     let page = cur_chapter.page.parse::<i32>().unwrap_or(0);
     let mut pages = Vec::new();
-    for i in 1..page + 1 {
-        let page_image = {
-            let s = format!("000{}", i);
-            s[(s.len() - 3)..].to_string()
-        };
-
+    for i in 1..=page {
+        let s = format!("000{}", i);
+        let page_image = s[(s.len() - 3)..].to_string();
         pages.push(format!(
             "https://{}/manga/{}/{}{}-{}.png",
             cur_path_name, index_name, directory, chapter_image, page_image

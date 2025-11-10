@@ -12,4 +12,3 @@ tanoshi-lib = "0.27.0"
 madara = { path = "../../common/madara" }
 anyhow = "1"
 lazy_static = "1"
-ureq = { version = "2", features = ["cookies"]}

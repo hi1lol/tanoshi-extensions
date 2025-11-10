@@ -11,6 +11,6 @@ networking = { path = "../../common/networking" }
 tanoshi-lib = "0.27.0"
 anyhow = "1"
 lazy_static = "1"
-scraper = "0.22.0"
+scraper = "0.24.0"
 urlencoding = "2.1.3"
 chrono = "0.4"

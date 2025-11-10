@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use chrono::NaiveDateTime;
+use chrono::{NaiveDateTime, Utc, DateTime};
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
 use networking::Agent;
@@ -86,12 +86,13 @@ pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &Agent) ->
         ("vars[meta_query][0][key]", "_wp_manga_chapter_type"),
         ("vars[meta_query][0][value]", "manga"),
     ];
-    
-    let body = client.post(&format!("{}/wp-admin/admin-ajax.php", url))
-        .set("Referer", url)
-        .set("X-Requested-With", "XMLHttpRequest")
-        .send_form(form)?
-        .into_string()?;
+
+    let mut resp = client
+        .post(&format!("{}/wp-admin/admin-ajax.php", url))
+        .header("Referer", url)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .send_form(form.iter().copied())?;
+    let body = resp.body_mut().read_to_string()?;
 
     let selector = Selector::parse("div.page-item-detail")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -116,12 +117,14 @@ pub fn get_popular_manga(url: &str, source_id: i64, page: i64, client: &Agent) -
         ("vars[meta_query][0][key]", "_wp_manga_chapter_type"),
         ("vars[meta_query][0][value]", "manga"),
     ];
-    
-    let body = client.post(&format!("{}/wp-admin/admin-ajax.php", url))
-        .set("Referer", url)
-        .set("X-Requested-With", "XMLHttpRequest")
-        .send_form(form)?
-        .into_string()?;
+
+    let mut resp = client
+        .post(&format!("{}/wp-admin/admin-ajax.php", url))
+        .header("Referer", url)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .send_form(form.iter().copied())?;
+    let body = resp.body_mut().read_to_string()?;
+
 
     let selector = Selector::parse("div.page-item-detail")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -136,9 +139,10 @@ pub fn search_manga_old(
     query: &str,
     client: &Agent
 ) -> Result<Vec<MangaInfo>> {
-    let body = client.get(&format!("{}/search?q={}&page={}", url, query, page))
-        .call()?
-        .into_string()?;
+    let mut resp = client
+        .get(&format!("{}/search?q={}&page={}", url, query, page))
+        .call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let selector =
         Selector::parse(".manga-item").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -169,12 +173,14 @@ pub fn search_manga(
         ("vars[meta_query][0][value]", "manga"),
         ("page", &(page - 1).to_string()),
     ];
-    
-    let body = client.post(&format!("{}/wp-admin/admin-ajax.php", url))
-        .set("Referer", url)
-        .set("X-Requested-With", "XMLHttpRequest")
-        .send_form(form)?
-        .into_string()?;
+
+    let mut resp = client
+        .post(&format!("{}/wp-admin/admin-ajax.php", url))
+        .header("Referer", url)
+        .header("X-Requested-With", "XMLHttpRequest")
+        .send_form(form.iter().copied())?;
+    let body = resp.body_mut().read_to_string()?;
+
 
     let selector = if is_selector_url {
         Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?
@@ -187,9 +193,8 @@ pub fn search_manga(
 }
 
 pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<MangaInfo> {
-    let body = client.get(&format!("{}{}", url, path))
-        .call()?
-        .into_string()?;
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 
@@ -272,17 +277,18 @@ fn parse_chapters(
                 .join("");
             let chapter_time = format!("{} 00:00", chapter_time.trim());
 
-            let uploaded = if let Ok(uploaded) =
+            let uploaded = if let Ok(dt) =
                 NaiveDateTime::parse_from_str(&chapter_time, "%B %d, %Y %H:%M")
             {
-                uploaded
-            } else if let Ok(uploaded) =
+                dt
+            } else if let Ok(dt) =
                 NaiveDateTime::parse_from_str(&chapter_time, "%d %b %Y %H:%M")
             {
-                uploaded
+                dt
             } else {
-                NaiveDateTime::from_timestamp(0, 0)
+                DateTime::<Utc>::from_timestamp(0, 0).unwrap().naive_utc()
             }
+            .and_utc()
             .timestamp();
 
             ChapterInfo {
@@ -313,9 +319,8 @@ fn parse_chapters(
 }
 
 pub fn get_chapters_old(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<Vec<ChapterInfo>> {
-    let body = client.get(&format!("{}{}", url, path))
-        .call()?
-        .into_string()?;
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 
@@ -349,12 +354,13 @@ pub fn get_chapters(
     chapter_name_selector: Option<&str>,
     client: &Agent
 ) -> Result<Vec<ChapterInfo>> {
-    let body = client.post(&format!("{}{}ajax/chapters", url, path))
-        .set("Referer", url)
-        .set("Content-Length", "0")
-        .set("X-Requested-With", "XMLHttpRequest")
-        .call()?
-        .into_string()?;
+    let mut resp = client
+        .post(&format!("{}{}ajax/chapters", url, path))
+        .header("Referer", url)
+        .header("Content-Length", "0")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .send_empty()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 
@@ -382,9 +388,8 @@ pub fn get_chapters(
 }
 
 pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {
-    let body = client.get(&format!("{}{}", url, path))
-        .call()?
-        .into_string()?;
+    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let body = resp.body_mut().read_to_string()?;
 
     let doc = Html::parse_document(&body);
 

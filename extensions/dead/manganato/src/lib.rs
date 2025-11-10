@@ -30,7 +30,7 @@ impl Default for Manganato {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None, None),
+            client: build_ureq_agent(None),
         }
     }
 }
@@ -68,16 +68,16 @@ impl Extension for Manganato {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let body = self.client.get(&format!("{URL}/genre-all/{page}?type=topview"))
-            .call()?
-            .into_string()?;
+        let mut res = self.client.get(&format!("{URL}/genre-all/{page}?type=topview"))
+            .call()?;
+        let body = res.body_mut().read_to_string()?;
         parse_manga_list(ID, &body, ".content-genres-item")
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {        
-        let body = self.client.get(&format!("{URL}/genre-all/{page}",))
-            .call()?
-            .into_string()?;
+        let mut res = self.client.get(&format!("{URL}/genre-all/{page}",))
+            .call()?;
+        let body = res.body_mut().read_to_string()?;
         parse_manga_list(ID, &body, ".content-genres-item")
     }
 
@@ -88,12 +88,12 @@ impl Extension for Manganato {
         _: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {       
         if let Some(query) = query {
-            let body = self.client.get(&format!(
+            let mut res = self.client.get(&format!(
                 "{URL}/search/story/{}?page={page}",
                 query.replace(" ", "_").to_lowercase()
             ))
-            .call()?
-            .into_string()?;
+            .call()?;
+            let body = res.body_mut().read_to_string()?;
             parse_search_manga_list(ID, &body, "div.search-story-item")
         } else {
             bail!("query can not be empty")
@@ -109,9 +109,9 @@ impl Extension for Manganato {
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {        
-        let body = self.client.get(&format!("https://chapmanganato.to{path}"))
-            .call()?
-            .into_string()?;
+        let mut res = self.client.get(&format!("https://chapmanganato.to{path}"))
+            .call()?;
+        let body = res.body_mut().read_to_string()?;
         get_pages(&body)
     }
 }

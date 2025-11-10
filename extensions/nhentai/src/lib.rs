@@ -1,13 +1,15 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use networking::{build_flaresolverr_client, build_ureq_agent, Agent};
+use networking::FlareClient;
 use scraper::{Html, Selector};
 use std::env;
+use std::sync::RwLock;
 use tanoshi_lib::prelude::{
     ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar,
 };
+use urlencoding::encode;
 
 pub static ID: i64 = 6;
 pub static NAME: &str = "nhentai";
@@ -82,24 +84,25 @@ lazy_static! {
 
 pub struct NHentai {
     preferences: Vec<Input>,
-    client: Agent,
+    net: RwLock<FlareClient>,
 }
 
 impl Default for NHentai {
     fn default() -> Self {
-        let mut instance = Self {
+        let fc = FlareClient::from_env(URL).unwrap_or_else(|_| FlareClient {
+            agent: networking::build_ureq_agent(None),
+            flaresolverr_url: std::env::var("FLARESOLVERR_URL").ok(),
+            session_id: std::env::var("FLARESOLVERR_SESSION").ok(),
+            default_headers: vec![],
+        });
+
+        Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None),
-        };
-
-        // If flaresolverr_url is set, build the client with it
-        if let Ok(flaresolverr_url) = env::var("FLARESOLVERR_URL") {
-            instance.client = build_flaresolverr_client(URL, &flaresolverr_url).unwrap();
+            net: RwLock::new(fc),
         }
-
-        instance
     }
 }
+
 
 impl NHentai {
     fn query(&self, filters: Option<Vec<Input>>) -> String {
@@ -183,8 +186,12 @@ impl NHentai {
     }
 
     fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
-        let mut resp = self.client.get(url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .write()
+            .unwrap()
+            .fetch_text(url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let gallery_selector =
@@ -264,14 +271,15 @@ impl Extension for NHentai {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        self.get_manga_list(&format!(
-            "{URL}/search/?q={}&sort=popular&page={page}",
-            self.query(None)
-        ))
+        let binding = self.query(None);
+        let q = encode(&binding);
+        self.get_manga_list(&format!("{URL}/search/?q={q}&sort=popular&page={page}"))
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        self.get_manga_list(&format!("{URL}/search/?q={}&page={page}", self.query(None)))
+        let binding = self.query(None);
+        let q = encode(&binding);
+        self.get_manga_list(&format!("{URL}/search/?q={q}&page={page}"))
     }
 
     fn search_manga(
@@ -280,22 +288,28 @@ impl Extension for NHentai {
         query: Option<String>,
         filters: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        let url = if filters.is_some() {
-            format!("{URL}/search/?q={}&page={page}", self.query(filters))
+        let url = if let Some(filters) = filters {
+            let binding = self.query(Some(filters));
+            let q = encode(&binding);
+            format!("{URL}/search/?q={q}&page={page}")
         } else if let Some(query) = query {
-            format!("{URL}/search/?q={query}&sort=popular&page={page}")
+            let q = encode(&query);
+            format!("{URL}/search/?q={q}&sort=popular&page={page}")
         } else {
             return Err(anyhow!("query and filters cannot be both empty"));
         };
-
         self.get_manga_list(&url)
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
         let url = format!("{}{}", URL, path);
         // Send the request and get the response as a string
-        let mut resp = self.client.get(&url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .write()
+            .unwrap()
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let gallery_id_selector = Selector::parse("h3[id=\"gallery_id\"]")
@@ -419,8 +433,12 @@ impl Extension for NHentai {
         let url = format!("{}{}", URL, path);
 
         // Send the request and get the response as a string
-        let mut resp = self.client.get(&url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .write()
+            .unwrap()
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let scanlator_selector = Selector::parse("a[href^=\"/group/\"] > .name")
@@ -457,21 +475,33 @@ impl Extension for NHentai {
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         let url = format!("{}{}", URL, path);
 
-        // Send the request and get the response as a string
-        let mut resp = self.client.get(&url).call()?;
-        let res = resp.body_mut().read_to_string()?;
+        let res = self
+            .net
+            .write()
+            .unwrap()
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
 
         let document = Html::parse_document(&res);
         let page_selector = Selector::parse(".thumb-container > .gallerythumb > img")
             .map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
 
         let mut pages = vec![];
-        let re = Regex::new(r"^https:\/\/t(\d*)\..+\/(\d+)\/(\d+)t.(.+)$")?;
+        // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
+        let re = Regex::new(r"^https?://t(\d*)\..+/(\d+)/(\d+)t\.(\w+)$")?;
         for thumb in document.select(&page_selector) {
-            if let Some(url) = thumb.value().attr("data-src") {
+            if let Some(orig) = thumb.value().attr("data-src") {
+                // normalize protocol-relative URLs
+                let url = if orig.starts_with("//") {
+                    format!("https:{}", orig)
+                } else {
+                    orig.to_string()
+                };
+
                 let cap = re
-                    .captures(url)?
-                    .ok_or(anyhow::anyhow!("no captured regex for {url}"))?;
+                    .captures(&url)?
+                    .ok_or_else(|| anyhow!("no captured regex for {url}"))?;
+
                 pages.push(format!(
                     "https://i{}.nhentai.net/galleries/{}/{}.{}",
                     &cap[1], &cap[2], &cap[3], &cap[4]

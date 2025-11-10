@@ -1,6 +1,6 @@
 [package]
 name = "nhentai"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 
 [lib]
@@ -20,3 +20,4 @@ log = "0.4"
 serde_qs = "0.15"
 phf = { version = "0.13", features = ["macros"] }
 serde-aux = "4"
+urlencoding = "2.1.3"

@@ -667,7 +667,7 @@ dependencies = [
 
 [[package]]
 name = "manhuafast"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -678,7 +678,7 @@ dependencies = [
 
 [[package]]
 name = "manhwa18cc"
-version = "0.4.0"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -753,6 +753,7 @@ dependencies = [
  "serde_json",
  "ureq",
  "url",
+ "urlencoding",
 ]
 
 [[package]]
@@ -1225,9 +1226,9 @@ dependencies = [
 
 [[package]]
 name = "servo_arc"
-version = "0.4.1"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "204ea332803bd95a0b60388590d59cf6468ec9becf626e2451f1d26a1d972de4"
+checksum = "170fb83ab34de17dc69aa7c67482b22218ddb85da56546f9bd6b929e32a05930"
 dependencies = [
  "stable_deref_trait",
 ]
@@ -1380,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "three_sixty_five_manga"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "lazy_static",

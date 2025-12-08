@@ -6,7 +6,7 @@ use madara::{
 };
 use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar, SourceInfo};
 use lazy_static::lazy_static;
-use networking::{Agent, build_ureq_agent, build_flaresolverr_client};
+use networking::FlareClient;
 
 tanoshi_lib::export_plugin!(register);
 
@@ -24,26 +24,15 @@ const URL: &str = "https://manhuafast.com";
 
 pub struct ManhuaFast {
     preferences: Vec<Input>,
-    client: Agent,
+    client: FlareClient,
 }
 
 impl Default for ManhuaFast {
     fn default() -> Self {
-        let mut instance = Self {
+        Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None),
-        };
-
-        // If flaresolverr_url is set, build the client with it if it fails then keep the normal client
-        if let Ok(flaresolverr_url) = env::var("FLARESOLVERR_URL") {
-            if let Ok(client) = build_flaresolverr_client(URL, &flaresolverr_url) {
-                instance.client = client;
-            } else {
-                eprintln!("Failed to build flaresolverr client, falling back to normal client");
-            }
+            client: FlareClient::from_env_or_plain(URL),
         }
-
-        instance
     }
 }
 

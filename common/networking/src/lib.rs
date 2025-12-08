@@ -251,12 +251,113 @@ impl FlareClient {
         // Direct GET using current agent + headers
         direct_get_with_headers(self, url, &default_headers)
     }
+
+    pub fn get_text(&self, url: &str) -> Result<String> {
+        self.fetch_text(url)
+    }
+
+    pub fn post_form_text(&self, url: &str, form: &[(&str, &str)]) -> Result<String> {
+        // snapshot config
+        let (fs_url_opt, session_id_opt, default_headers) = {
+            let guard = self.inner.lock().unwrap();
+            (
+                guard.flaresolverr_url.clone(),
+                guard.session_id.clone(),
+                guard.default_headers.clone(),
+            )
+        };
+
+        // Try FlareSolverr first
+        if let Some(fs_url) = fs_url_opt {
+            if let Ok(body) = proxy_post_form(&fs_url, session_id_opt.as_deref(), url, form) {
+                return Ok(body);
+            }
+        }
+
+        // Fallback to direct POST
+        let agent = {
+            let guard = self.inner.lock().unwrap();
+            guard.agent.clone()
+        };
+        let mut req = agent.post(url);
+        for (k, v) in default_headers {
+            req = req.header(&k, &v);
+        }
+        let mut resp = req.send_form(form.iter().copied())?;
+        Ok(resp.body_mut().read_to_string()?)
+    }
+
+    pub fn post_empty_text(
+        &self,
+        url: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<String> {
+        // Snapshot default headers and agent
+        let (default_headers, agent) = {
+            let guard = self.inner.lock().unwrap();
+            (guard.default_headers.clone(), guard.agent.clone())
+        };
+
+        let mut req = agent.post(url);
+
+        // default_headers: Vec<(String, String)>
+        for (k, v) in default_headers.iter() {
+            req = req.header(k, v);            // &String → &str via Deref
+        }
+
+        // extra_headers: &[(&str, &str)]
+        for (k, v) in extra_headers.iter() {
+            req = req.header(*k, *v);          // &(&str) → &str
+        }
+
+        let mut resp = req.send_empty()?;
+        Ok(resp.body_mut().read_to_string()?)
+    }
 }
 
 fn proxy_fetch_text(fs_url: &str, session_id: Option<&str>, url: &str) -> Result<String> {
     let payload = match session_id {
         Some(sid) => json!({"cmd":"request.get","url":url,"maxTimeout":60000,"session":sid}),
         None => json!({"cmd":"request.get","url":url,"maxTimeout":60000}),
+    };
+
+    let mut resp = ureq::post(fs_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = resp.body_mut().read_to_string()?;
+    let body: FlareSolverrResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!("FlareSolverr error: {}", body.message));
+    }
+    Ok(body.solution.response)
+}
+
+fn proxy_post_form(
+    fs_url: &str,
+    session_id: Option<&str>,
+    url: &str,
+    form: &[(&str, &str)],
+) -> Result<String> {
+    let body = form
+        .iter()
+        .map(|(k, v)| format!("{}={}", urlencoding::encode(k), urlencoding::encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let payload = match session_id {
+        Some(sid) => json!({
+            "cmd": "request.post",
+            "url": url,
+            "maxTimeout": 60000,
+            "session": sid,
+            "postData": body,
+        }),
+        None => json!({
+            "cmd": "request.post",
+            "url": url,
+            "maxTimeout": 60000,
+            "postData": body,
+        }),
     };
 
     let mut resp = ureq::post(fs_url)

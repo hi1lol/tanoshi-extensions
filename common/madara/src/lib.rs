@@ -2,7 +2,27 @@ use anyhow::{anyhow, Result};
 use chrono::{NaiveDateTime, Utc, DateTime};
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
-use networking::Agent;
+use networking::{FlareClient, Agent};
+
+// A trait to abstract over different HTTP clients for fetching manga details.
+pub trait DetailClient {
+    fn fetch_body(&self, url: &str) -> anyhow::Result<String>;
+}
+
+impl DetailClient for FlareClient {
+    fn fetch_body(&self, url: &str) -> anyhow::Result<String> {
+        // use your FlareClient GET path (Cloudflare-aware)
+        self.get_text(url)
+    }
+}
+
+impl DetailClient for Agent {
+    fn fetch_body(&self, url: &str) -> anyhow::Result<String> {
+        let mut resp = self.get(url).call()?;
+        let body = resp.body_mut().read_to_string()?;
+        Ok(body)
+    }
+}
 
 fn get_data_src(el: &ElementRef) -> Option<String> {
     el.value()
@@ -69,7 +89,7 @@ pub fn parse_manga_list(
     Ok(manga)
 }
 
-pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
+pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &FlareClient) -> Result<Vec<MangaInfo>> {
     let form: &[(&str, &str)] = &[
         ("action", "madara_load_more"),
         ("page", &(page - 1).to_string()),
@@ -87,12 +107,10 @@ pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &Agent) ->
         ("vars[meta_query][0][value]", "manga"),
     ];
 
-    let mut resp = client
-        .post(&format!("{}/wp-admin/admin-ajax.php", url))
-        .header("Referer", url)
-        .header("X-Requested-With", "XMLHttpRequest")
-        .send_form(form.iter().copied())?;
-    let body = resp.body_mut().read_to_string()?;
+    let body = client.post_form_text(
+        &format!("{}/wp-admin/admin-ajax.php", url),
+        form,
+    )?;
 
     let selector = Selector::parse("div.page-item-detail")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -100,7 +118,7 @@ pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &Agent) ->
     parse_manga_list(url, source_id, &body, &selector, false)
 }
 
-pub fn get_popular_manga(url: &str, source_id: i64, page: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
+pub fn get_popular_manga(url: &str, source_id: i64, page: i64, client: &FlareClient) -> Result<Vec<MangaInfo>> {
     let form: &[(&str, &str)] = &[
         ("action", "madara_load_more"),
         ("page", &(page - 1).to_string()),
@@ -118,13 +136,10 @@ pub fn get_popular_manga(url: &str, source_id: i64, page: i64, client: &Agent) -
         ("vars[meta_query][0][value]", "manga"),
     ];
 
-    let mut resp = client
-        .post(&format!("{}/wp-admin/admin-ajax.php", url))
-        .header("Referer", url)
-        .header("X-Requested-With", "XMLHttpRequest")
-        .send_form(form.iter().copied())?;
-    let body = resp.body_mut().read_to_string()?;
-
+    let body = client.post_form_text(
+        &format!("{}/wp-admin/admin-ajax.php", url),
+        form,
+    )?;
 
     let selector = Selector::parse("div.page-item-detail")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -156,7 +171,7 @@ pub fn search_manga(
     page: i64,
     query: &str,
     is_selector_url: bool,
-    client: &Agent
+    client: &FlareClient
 ) -> Result<Vec<MangaInfo>> {
     let form: &[(&str, &str)] = &[
         ("action", "madara_load_more"),
@@ -174,13 +189,10 @@ pub fn search_manga(
         ("page", &(page - 1).to_string()),
     ];
 
-    let mut resp = client
-        .post(&format!("{}/wp-admin/admin-ajax.php", url))
-        .header("Referer", url)
-        .header("X-Requested-With", "XMLHttpRequest")
-        .send_form(form.iter().copied())?;
-    let body = resp.body_mut().read_to_string()?;
-
+    let body = client.post_form_text(
+        &format!("{}/wp-admin/admin-ajax.php", url),
+        form,
+    )?;
 
     let selector = if is_selector_url {
         Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?
@@ -192,9 +204,13 @@ pub fn search_manga(
     parse_manga_list(url, source_id, &body, &selector, is_selector_url)
 }
 
-pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<MangaInfo> {
-    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
-    let body = resp.body_mut().read_to_string()?;
+pub fn get_manga_detail<C: DetailClient>(
+    url: &str,
+    path: &str,
+    source_id: i64,
+    client: &C,
+) -> Result<MangaInfo> {
+    let body = client.fetch_body(&format!("{}{}", url, path))?;
 
     let doc = Html::parse_document(&body);
 
@@ -352,15 +368,16 @@ pub fn get_chapters(
     path: &str,
     source_id: i64,
     chapter_name_selector: Option<&str>,
-    client: &Agent
+    client: &FlareClient
 ) -> Result<Vec<ChapterInfo>> {
-    let mut resp = client
-        .post(&format!("{}{}ajax/chapters", url, path))
-        .header("Referer", url)
-        .header("Content-Length", "0")
-        .header("X-Requested-With", "XMLHttpRequest")
-        .send_empty()?;
-    let body = resp.body_mut().read_to_string()?;
+    let body = client.post_empty_text(
+        &format!("{}{}ajax/chapters", url, path),
+        &[
+            ("Referer", url),
+            ("Content-Length", "0"),
+            ("X-Requested-With", "XMLHttpRequest"),
+        ],
+    )?;
 
     let doc = Html::parse_document(&body);
 
@@ -387,9 +404,13 @@ pub fn get_chapters(
     )
 }
 
-pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {
-    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
-    let body = resp.body_mut().read_to_string()?;
+pub fn get_pages(url: &str, path: &str, client: &FlareClient) -> Result<Vec<String>> {
+    let body = client.post_empty_text(
+        &format!("{}{}", url, path),
+        &[
+            ("Referer", url),
+        ],
+    )?;
 
     let doc = Html::parse_document(&body);
 

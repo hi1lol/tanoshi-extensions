@@ -35,9 +35,13 @@ impl Default for ThreeSixtyFiveManga {
             
         };
 
-        // If flaresolverr_url is set, build the client with it
+        // If flaresolverr_url is set, build the client with it if it fails then keep the normal client
         if let Ok(flaresolverr_url) = env::var("FLARESOLVERR_URL") {
-            instance.client = build_flaresolverr_client(URL, &flaresolverr_url).unwrap();
+            if let Ok(client) = build_flaresolverr_client(URL, &flaresolverr_url) {
+                instance.client = client;
+            } else {
+                eprintln!("Failed to build flaresolverr client, falling back to normal client");
+            }
         }
 
         instance

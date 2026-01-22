@@ -521,9 +521,18 @@ impl Extension for NHentai {
                     .captures(&url)?
                     .ok_or_else(|| anyhow!("no captured regex for {url}"))?;
 
+                let mut ext = cap[4].to_string();
+                loop {
+                    match ext.split_once('.') {
+                        Some((a, b)) if a == b => ext = a.to_string(),
+                        _ => break,
+                    }
+                }
+
+
                 pages.push(format!(
                     "https://i{}.nhentai.net/galleries/{}/{}.{}",
-                    &cap[1], &cap[2], &cap[3], &cap[4]
+                    &cap[1], &cap[2], &cap[3], &ext
                 ));
             }
         }
@@ -660,7 +669,7 @@ mod test {
         let page = "/g/624576".to_string();    
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
-        let re = Regex::new(r"https://i3.nhentai.net/galleries/3748415/2.webp.webp").unwrap();
+        let re = Regex::new(r"https://i3.nhentai.net/galleries/3748415/2.webp").unwrap();
         assert!(re.is_match(&res[1]).unwrap());
     }
 }

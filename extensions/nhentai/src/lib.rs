@@ -505,7 +505,9 @@ impl Extension for NHentai {
 
         let mut pages = vec![];
         // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
-        let re = Regex::new(r"^https?://t(\d*)\..+/(\d+)/(\d+)t\.(\w+)$")?;
+        let re = Regex::new(
+            r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$"
+        )?;
         for thumb in document.select(&page_selector) {
             if let Some(orig) = thumb.value().attr("data-src") {
                 // normalize protocol-relative URLs
@@ -648,10 +650,17 @@ mod test {
 
         let nhentai: NHentai = create_test_instance();
 
-        let res = nhentai.get_pages("/g/385965".to_string()).unwrap();
+        let page = "/g/385965".to_string();
+        let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
         let re = Regex::new(r"https://i\d*.nhentai.net/galleries/2099700/1.jpg").unwrap();
 
         assert!(re.is_match(&res[0]).unwrap());
+
+        let page = "/g/624576".to_string();    
+        let res = nhentai.get_pages(page).unwrap();
+        assert!(!res.is_empty());
+        let re = Regex::new(r"https://i3.nhentai.net/galleries/3748415/2.webp.webp").unwrap();
+        assert!(re.is_match(&res[1]).unwrap());
     }
 }

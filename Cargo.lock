@@ -252,6 +252,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2972feb8dffe7bc8c5463b1dacda1b0dfbed3710e50f977d965429692d74cd8"
 
 [[package]]
+name = "env_filter"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a1c3cc8e57274ec99de65301228b537f1e4eedc1b8e0f9411c6caac8ae7308f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "env_logger"
+version = "0.11.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2daee4ea451f429a58296525ddf28b45a3b64f1acf6587e2067437bb11e218d"
+dependencies = [
+ "env_filter",
+ "log",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -635,6 +654,7 @@ version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "env_logger",
  "fancy-regex",
  "lazy_static",
  "log",
@@ -749,6 +769,9 @@ dependencies = [
  "anyhow",
  "cookie",
  "cookie_store",
+ "env_logger",
+ "log",
+ "once_cell",
  "serde",
  "serde_json",
  "ureq",

@@ -1,11 +1,118 @@
+mod ratelimit;
+
 use anyhow::{Result, anyhow};
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
+use log::info;
+use ratelimit::RateLimiter;
 use serde_json::{Value as JsonValue, json};
+use ureq::typestate::{WithBody, WithoutBody};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 use ureq::{Cookie, http::Uri};
 
 pub type Agent = ureq::Agent;
+
+pub type HttpResponse = ureq::http::Response<ureq::Body>;
+
+#[derive(Clone)]
+pub struct RateLimitedAgent {
+    inner: ureq::Agent,
+    limiter: Option<Arc<RateLimiter>>,
+}
+
+impl RateLimitedAgent {
+    pub fn new(inner: ureq::Agent, requests_per_second: Option<f64>) -> Self {
+        info!("Net RateLimitedAgent setup with {:?} RPS", requests_per_second);
+        let limiter = requests_per_second
+            .and_then(RateLimiter::new)
+            .map(Arc::new);
+
+        Self { inner, limiter }
+    }
+
+    pub fn get(&self, url: &str) -> RateLimitedRequest<WithoutBody> {
+        RateLimitedRequest {
+            inner: self.inner.get(url),
+            limiter: self.limiter.clone(),
+        }
+    }
+
+    pub fn post(&self, url: &str) -> RateLimitedRequest<WithBody> {
+        RateLimitedRequest {
+            inner: self.inner.post(url),
+            limiter: self.limiter.clone(),
+        }
+    }
+}
+
+pub struct RateLimitedRequest<B> {
+    inner: ureq::RequestBuilder<B>,
+    limiter: Option<Arc<RateLimiter>>,
+}
+
+impl<B> RateLimitedRequest<B> {
+    #[inline]
+    fn throttle(&self) {
+        if let Some(l) = &self.limiter {
+            l.acquire();
+        }
+    }
+
+    pub fn header<K, V>(self, key: K, value: V) -> Self
+    where
+        ureq::http::header::HeaderName: TryFrom<K>,
+        <ureq::http::header::HeaderName as TryFrom<K>>::Error: Into<ureq::http::Error>,
+        ureq::http::header::HeaderValue: TryFrom<V>,
+        <ureq::http::header::HeaderValue as TryFrom<V>>::Error: Into<ureq::http::Error>,
+    {
+        Self {
+            inner: self.inner.header(key, value),
+            limiter: self.limiter,
+        }
+    }
+
+    pub fn query<K, V>(self, key: K, value: V) -> Self
+    where
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        Self {
+            inner: self.inner.query(key, value),
+            limiter: self.limiter,
+        }
+    }
+}
+
+/// Methods only available for RequestBuilder<WithoutBody>
+impl RateLimitedRequest<WithoutBody> {
+    pub fn call(self) -> Result<HttpResponse, ureq::Error> {
+        self.throttle();
+        self.inner.call()
+    }
+}
+
+/// Methods only available for RequestBuilder<WithBody>
+impl RateLimitedRequest<WithBody> {
+    pub fn send_empty(self) -> Result<HttpResponse, ureq::Error> {
+        self.throttle();
+        self.inner.send_empty()
+    }
+
+    pub fn send_form<I, K, V>(self, form: I) -> Result<HttpResponse, ureq::Error>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        self.throttle();
+        self.inner.send_form(form)
+    }
+
+    pub fn send_json<T: serde::Serialize>(self, value: &T) -> Result<HttpResponse, ureq::Error> {
+        self.throttle();
+        self.inner.send_json(value)
+    }
+}
 
 #[allow(non_snake_case)]
 #[derive(Debug, serde::Deserialize, Clone)]
@@ -51,6 +158,15 @@ pub fn build_ureq_agent(user_agent: Option<&str>) -> Agent {
     }
     cfg.build().into()
 }
+
+pub fn build_rate_limited_ureq_agent(
+    user_agent: Option<&str>,
+    requests_per_second: Option<f64>,
+) -> RateLimitedAgent {
+    let agent = build_ureq_agent(user_agent);
+    RateLimitedAgent::new(agent, requests_per_second)
+}
+
 
 fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolverrCookie>) {
     let mut jar = agent.cookie_jar_lock();
@@ -166,7 +282,7 @@ impl FlareClient {
     pub fn from_env_or_plain(origin_url: &str) -> Self {
         Self::from_env(origin_url).unwrap_or_else(|_| Self::plain())
     }
-    
+
     pub fn from_env(origin_url: &str) -> Result<Self> {
         let flaresolverr_url = std::env::var("FLARESOLVERR_URL").ok();
 
@@ -287,11 +403,7 @@ impl FlareClient {
         Ok(resp.body_mut().read_to_string()?)
     }
 
-    pub fn post_empty_text(
-        &self,
-        url: &str,
-        extra_headers: &[(&str, &str)],
-    ) -> Result<String> {
+    pub fn post_empty_text(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<String> {
         // Snapshot default headers and agent
         let (default_headers, agent) = {
             let guard = self.inner.lock().unwrap();
@@ -302,12 +414,12 @@ impl FlareClient {
 
         // default_headers: Vec<(String, String)>
         for (k, v) in default_headers.iter() {
-            req = req.header(k, v);            // &String → &str via Deref
+            req = req.header(k, v); // &String → &str via Deref
         }
 
         // extra_headers: &[(&str, &str)]
         for (k, v) in extra_headers.iter() {
-            req = req.header(*k, *v);          // &(&str) → &str
+            req = req.header(*k, *v); // &(&str) → &str
         }
 
         let mut resp = req.send_empty()?;

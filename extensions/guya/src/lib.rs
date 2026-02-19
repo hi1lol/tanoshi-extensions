@@ -1,12 +1,13 @@
 use guyalib::{get_chapters, get_manga_detail, get_manga_list, get_pages};
 use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar};
 use lazy_static::lazy_static;
-use networking::{Agent, build_ureq_agent};
+use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use std::env;
 
 const ID: i64 = 7;
 const NAME: &str = "Guya";
 const URL: &str = "https://guya.cubari.moe";
+const REQUESTS_PER_SECOND: f64 = 1.0;
 
 tanoshi_lib::export_plugin!(register);
 
@@ -20,14 +21,14 @@ lazy_static! {
 
 pub struct Guya {
     preferences: Vec<Input>,
-    client: Agent,
+    client: RateLimitedAgent,
 }
 
 impl Default for Guya {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None),
+            client: build_rate_limited_ureq_agent(None, Some(REQUESTS_PER_SECOND)),
         }
     }
 }

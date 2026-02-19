@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::prelude::*;
 use lazy_static::lazy_static;
-use networking::{build_ureq_agent, Agent};
+use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use scraper::{Html, Selector};
 use std::env;
 use tanoshi_lib::extensions::PluginRegistrar;
@@ -21,17 +21,18 @@ lazy_static! {
 const ID: i64 = 28;
 const NAME: &str = "WeebCentral";
 const URL: &str = "https://weebcentral.com";
+const REQUESTS_PER_SECOND: f64 = 1.0;
 
 pub struct Weebcentral {
     preferences: Vec<Input>,
-    client: Agent,
+    client: RateLimitedAgent,
 }
 
 impl Default for Weebcentral {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None),
+            client: build_rate_limited_ureq_agent(None, Some(REQUESTS_PER_SECOND)),
         }
     }
 }
@@ -39,7 +40,7 @@ impl Default for Weebcentral {
 fn get_manga_list(
     mut page: i64,
     suburl: &str,
-    client: &Agent,
+    client: &RateLimitedAgent,
 ) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
     if page < 1 {
         page = 1;
@@ -141,11 +142,19 @@ impl Extension for Weebcentral {
     }
 
     fn get_popular_manga(&self, page: i64) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        get_manga_list(page, "/search/data?limit=32&author=&text=&sort=Popularity&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full%20Display&offset=", &self.client)
+        get_manga_list(
+            page,
+            "/search/data?limit=32&author=&text=&sort=Popularity&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full%20Display&offset=",
+            &self.client,
+        )
     }
 
     fn get_latest_manga(&self, page: i64) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        get_manga_list(page, "/search/data?limit=32&sort=Latest+Updates&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full+Display&offset=", &self.client)
+        get_manga_list(
+            page,
+            "/search/data?limit=32&sort=Latest+Updates&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full+Display&offset=",
+            &self.client,
+        )
     }
 
     fn search_manga(
@@ -155,7 +164,14 @@ impl Extension for Weebcentral {
         _: Option<Vec<Input>>,
     ) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
         //TODO: Add filters
-        get_manga_list(page, &format!("/search/data?author=&text={}&sort=Latest%20Updates&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full%20Display&offset=", encode(query.unwrap_or_default().as_str()).into_owned()), &self.client)
+        get_manga_list(
+            page,
+            &format!(
+                "/search/data?author=&text={}&sort=Latest%20Updates&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full%20Display&offset=",
+                encode(query.unwrap_or_default().as_str()).into_owned()
+            ),
+            &self.client,
+        )
     }
 
     fn get_manga_detail(&self, path: String) -> Result<tanoshi_lib::prelude::MangaInfo> {

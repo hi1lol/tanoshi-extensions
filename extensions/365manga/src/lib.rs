@@ -21,6 +21,7 @@ lazy_static! {
 const ID: i64 = 17;
 const NAME: &str = "365Manga";
 const URL: &str = "https://harimanga.me";
+//const REQUESTS_PER_SECOND: f64 = 1.0;
 
 pub struct ThreeSixtyFiveManga {
     preferences: Vec<Input>,

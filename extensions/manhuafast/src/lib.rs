@@ -21,6 +21,7 @@ lazy_static! {
 const ID: i64 = 12;
 const NAME: &str = "ManhuaFast";
 const URL: &str = "https://manhuafast.com";
+//const REQUESTS_PER_SECOND: f64 = 1.0;
 
 pub struct ManhuaFast {
     preferences: Vec<Input>,

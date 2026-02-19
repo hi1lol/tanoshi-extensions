@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use chrono::{NaiveDateTime, Utc, DateTime};
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
-use networking::{FlareClient, Agent};
+use networking::{FlareClient, RateLimitedAgent};
 
 // A trait to abstract over different HTTP clients for fetching manga details.
 pub trait DetailClient {
@@ -16,7 +16,7 @@ impl DetailClient for FlareClient {
     }
 }
 
-impl DetailClient for Agent {
+impl DetailClient for RateLimitedAgent {
     fn fetch_body(&self, url: &str) -> anyhow::Result<String> {
         let mut resp = self.get(url).call()?;
         let body = resp.body_mut().read_to_string()?;
@@ -152,7 +152,7 @@ pub fn search_manga_old(
     source_id: i64,
     page: i64,
     query: &str,
-    client: &Agent
+    client: &RateLimitedAgent
 ) -> Result<Vec<MangaInfo>> {
     let mut resp = client
         .get(&format!("{}/search?q={}&page={}", url, query, page))
@@ -334,7 +334,7 @@ fn parse_chapters(
     Ok(chapters)
 }
 
-pub fn get_chapters_old(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<Vec<ChapterInfo>> {
+pub fn get_chapters_old(url: &str, path: &str, source_id: i64, client: &RateLimitedAgent) -> Result<Vec<ChapterInfo>> {
     let mut resp = client.get(&format!("{}{}", url, path)).call()?;
     let body = resp.body_mut().read_to_string()?;
 

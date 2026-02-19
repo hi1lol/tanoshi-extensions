@@ -2,14 +2,15 @@ mod dto;
 mod filter;
 
 use crate::dto::{
-    manga::{request, ListOrder, Order, Rating},
     Relationship, Results,
+    manga::{ListOrder, Order, Rating, request},
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use dto::ResultsAtHome;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use networking::{build_ureq_agent, Agent};
+use log::info;
+use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use std::env;
 use tanoshi_lib::extensions::PluginRegistrar;
 use tanoshi_lib::prelude::*;
@@ -26,20 +27,26 @@ lazy_static! {
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub static ID: i64 = 2;
-pub static NAME: &str = "Mangadex";
-pub static URL: &str = "https://api.mangadex.org";
+const ID: i64 = 2;
+const NAME: &str = "Mangadex";
+const URL: &str = "https://api.mangadex.org";
+// While api.mangadex.org has a rate limit of 5 requests per second
+// The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
+const REQUESTS_PER_SECOND: f64 = 0.6;
 
 pub struct Mangadex {
     preferences: Vec<Input>,
-    client: Agent,
+    client: RateLimitedAgent,
 }
 
 impl Default for Mangadex {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None),
+            client: build_rate_limited_ureq_agent(
+                Some(format!("Tanoshi-Extension/{}", env!("CARGO_PKG_VERSION")).as_str()),
+                Some(REQUESTS_PER_SECOND),
+            ),
         }
     }
 }
@@ -330,6 +337,7 @@ impl Extension for Mangadex {
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         let chapter_id = path.replace("/chapter/", "");
         let url = format!("{}/at-home/server/{}", URL, chapter_id);
+        info!("URL = {:?}", url);
 
         let mut resp = self.client.get(&url).call()?;
         let res: ResultsAtHome = resp.body_mut().read_json()?;

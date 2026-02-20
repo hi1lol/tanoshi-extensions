@@ -32,11 +32,14 @@ const NAME: &str = "Mangadex";
 const URL: &str = "https://api.mangadex.org";
 // While api.mangadex.org has a rate limit of 5 requests per second
 // The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
-const REQUESTS_PER_SECOND: f64 = 0.6;
+const REQUESTS_PER_SECOND: f64 = 3.0;
+const REQUESTS_PER_SECOND_AT_HOME: f64 = 0.6;
+
 
 pub struct Mangadex {
     preferences: Vec<Input>,
     client: RateLimitedAgent,
+    client_at_home: RateLimitedAgent,
 }
 
 impl Default for Mangadex {
@@ -46,6 +49,10 @@ impl Default for Mangadex {
             client: build_rate_limited_ureq_agent(
                 Some(format!("Tanoshi-Extension/{}", env!("CARGO_PKG_VERSION")).as_str()),
                 Some(REQUESTS_PER_SECOND),
+            ),
+            client_at_home: build_rate_limited_ureq_agent(
+                Some(format!("Tanoshi-Extension/{}", env!("CARGO_PKG_VERSION")).as_str()),
+                Some(REQUESTS_PER_SECOND_AT_HOME),
             ),
         }
     }
@@ -339,7 +346,7 @@ impl Extension for Mangadex {
         let url = format!("{}/at-home/server/{}", URL, chapter_id);
         info!("URL = {:?}", url);
 
-        let mut resp = self.client.get(&url).call()?;
+        let mut resp = self.client_at_home.get(&url).call()?;
         let res: ResultsAtHome = resp.body_mut().read_json()?;
         Ok(map_result_to_pages(res))
     }

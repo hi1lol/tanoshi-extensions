@@ -110,6 +110,7 @@ impl Into<MangaInfo> for &Dir {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct DirChapter {
     #[serde(skip)]
     pub index_name: String,
@@ -155,6 +156,7 @@ where
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
+#[allow(dead_code)]
 pub struct CurChapter {
     pub chapter: String,
     #[serde(rename = "Type")]

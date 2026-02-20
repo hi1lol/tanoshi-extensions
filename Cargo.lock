@@ -690,7 +690,9 @@ name = "manhuafast"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "env_logger",
  "lazy_static",
+ "log",
  "madara",
  "networking",
  "tanoshi-lib",

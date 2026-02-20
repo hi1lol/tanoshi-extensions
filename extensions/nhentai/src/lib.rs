@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use networking::FlareClient;
+use networking::{FlareClient, build_rate_limited_flaresolverr_client};
 use scraper::{Html, Selector};
 use std::env;
 use tanoshi_lib::prelude::{
@@ -13,7 +13,7 @@ use urlencoding::encode;
 const ID: i64 = 6;
 const NAME: &str = "nhentai";
 const URL: &str = "https://nhentai.net";
-//const REQUESTS_PER_SECOND: f64 = 1.0;
+const REQUESTS_PER_SECOND: f64 = 1.0;
 
 tanoshi_lib::export_plugin!(register);
 
@@ -84,14 +84,14 @@ lazy_static! {
 
 pub struct NHentai {
     preferences: Vec<Input>,
-    net: FlareClient,
+    client: FlareClient,
 }
 
 impl Default for NHentai {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            net: FlareClient::from_env_or_plain(URL),
+            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND))
         }
     }
 }
@@ -210,7 +210,7 @@ impl NHentai {
 
     fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
         let res = self
-            .net
+            .client
             .fetch_text(url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -329,7 +329,7 @@ impl Extension for NHentai {
         let url = format!("{}{}", URL, path);
         // Send the request and get the response as a string
         let res = self
-            .net
+            .client
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -456,7 +456,7 @@ impl Extension for NHentai {
 
         // Send the request and get the response as a string
         let res = self
-            .net
+            .client
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -496,7 +496,7 @@ impl Extension for NHentai {
         let url = format!("{}{}", URL, path);
 
         let res = self
-            .net
+            .client
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -552,6 +552,8 @@ impl Extension for NHentai {
 
 #[cfg(test)]
 mod test {
+    use log::{debug, info};
+
     use super::*;
 
     fn create_test_instance() -> NHentai {
@@ -670,7 +672,9 @@ mod test {
         let page = "/g/624576".to_string();    
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
-        let re = Regex::new(r"https://i3.nhentai.net/galleries/3748415/2.webp").unwrap();
+        let re = Regex::new(r"https://i\d*.nhentai.net/galleries/3748415/2.webp").unwrap();
+        println!("re={:?}", re);
+        println!("res[1]={:?}", res[1]);
         assert!(re.is_match(&res[1]).unwrap());
     }
 }

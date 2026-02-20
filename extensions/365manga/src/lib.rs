@@ -1,12 +1,12 @@
 use std::env;
 
 use anyhow::bail;
+use lazy_static::lazy_static;
 use madara::{
     get_chapters, get_latest_manga, get_manga_detail, get_pages, get_popular_manga, search_manga,
 };
+use networking::{FlareClient, build_rate_limited_flaresolverr_client};
 use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar, SourceInfo};
-use lazy_static::lazy_static;
-use networking::FlareClient;
 
 tanoshi_lib::export_plugin!(register);
 
@@ -21,7 +21,7 @@ lazy_static! {
 const ID: i64 = 17;
 const NAME: &str = "365Manga";
 const URL: &str = "https://harimanga.me";
-//const REQUESTS_PER_SECOND: f64 = 1.0;
+const REQUESTS_PER_SECOND: f64 = 1.0;
 
 pub struct ThreeSixtyFiveManga {
     preferences: Vec<Input>,
@@ -32,16 +32,13 @@ impl Default for ThreeSixtyFiveManga {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: FlareClient::from_env_or_plain(URL),
+            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND)),
         }
     }
 }
 
 impl Extension for ThreeSixtyFiveManga {
-    fn set_preferences(
-        &mut self,
-        preferences: Vec<Input>,
-    ) -> anyhow::Result<()> {
+    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
         for input in preferences {
             for pref in self.preferences.iter_mut() {
                 if input.eq(pref) {

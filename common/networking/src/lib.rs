@@ -2,7 +2,7 @@ mod ratelimit;
 
 use anyhow::{Result, anyhow};
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
-use log::info;
+use log::{debug, info, warn};
 use ratelimit::RateLimiter;
 use serde_json::{Value as JsonValue, json};
 use ureq::typestate::{WithBody, WithoutBody};
@@ -167,6 +167,14 @@ pub fn build_rate_limited_ureq_agent(
     RateLimitedAgent::new(agent, requests_per_second)
 }
 
+pub fn build_rate_limited_flaresolverr_client(
+    origin_url: &str,
+    requests_per_second: Option<f64>,
+) -> FlareClient {
+    FlareClient::from_env_with_rps(origin_url, requests_per_second)
+        .unwrap_or_else(|_| FlareClient::plain_with_rps(requests_per_second))
+}
+
 
 fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolverrCookie>) {
     let mut jar = agent.cookie_jar_lock();
@@ -258,6 +266,7 @@ struct Inner {
     flaresolverr_url: Option<String>,
     session_id: Option<String>,
     default_headers: Vec<(String, String)>,
+    limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Public handle that is Send + Sync.
@@ -266,27 +275,41 @@ pub struct FlareClient {
     inner: Arc<Mutex<Inner>>,
 }
 impl FlareClient {
-    /// Plain client (no FlareSolverr), safe default.
-    pub fn plain() -> Self {
+    #[inline]
+    fn throttle(&self) {
+        let limiter = {
+            let guard = self.inner.lock().unwrap();
+            guard.limiter.clone()
+        };
+        if let Some(l) = limiter {
+            l.acquire();
+        }
+    }
+
+    pub fn plain_with_rps(requests_per_second: Option<f64>) -> Self {
+        let limiter = requests_per_second
+            .and_then(RateLimiter::new)
+            .map(Arc::new);
+
         FlareClient {
-            inner: std::sync::Arc::new(std::sync::Mutex::new(Inner {
+            inner: Arc::new(Mutex::new(Inner {
                 agent: build_ureq_agent(None),
                 flaresolverr_url: None,
                 session_id: None,
                 default_headers: vec![],
+                limiter,
             })),
         }
     }
 
-    /// Make this never error: on any failure, return a plain client.
-    pub fn from_env_or_plain(origin_url: &str) -> Self {
-        Self::from_env(origin_url).unwrap_or_else(|_| Self::plain())
-    }
+    pub fn from_env_with_rps(origin_url: &str, requests_per_second: Option<f64>) -> Result<Self> {
+        let limiter = requests_per_second
+            .and_then(RateLimiter::new)
+            .map(Arc::new);
 
-    pub fn from_env(origin_url: &str) -> Result<Self> {
         let flaresolverr_url = std::env::var("FLARESOLVERR_URL").ok();
+        debug!("FLARESOLVERR_URL={:?}", flaresolverr_url);
 
-        // If FS not configured: plain agent, no headers.
         if flaresolverr_url.is_none() {
             return Ok(Self {
                 inner: Arc::new(Mutex::new(Inner {
@@ -294,11 +317,12 @@ impl FlareClient {
                     flaresolverr_url: None,
                     session_id: None,
                     default_headers: vec![],
+                    limiter,
                 })),
             });
         }
-        let flaresolverr_url = flaresolverr_url.unwrap();
 
+        let flaresolverr_url = flaresolverr_url.unwrap();
         // Optional session
         let mut session_id = std::env::var("FLARESOLVERR_SESSION").ok();
         if session_id.is_none() {
@@ -338,8 +362,24 @@ impl FlareClient {
                 flaresolverr_url: Some(flaresolverr_url),
                 session_id,
                 default_headers,
+                limiter,
             })),
         })
+    }
+
+    /// Plain client (no FlareSolverr), safe default.
+    pub fn plain() -> Self {
+        Self::plain_with_rps(None)
+    }
+
+    /// Make this never error: on any failure, return a plain client.
+    pub fn from_env_or_plain(origin_url: &str) -> Self {
+        Self::from_env_with_rps(origin_url, None)
+            .unwrap_or_else(|_| Self::plain_with_rps(None))
+    }
+
+    pub fn from_env(origin_url: &str) -> Result<Self> {
+        Self::from_env_with_rps(origin_url, None)
     }
 
     /// Thread-safe: takes &self. Internally locks, mutates as needed.
@@ -356,15 +396,21 @@ impl FlareClient {
 
         // If FS configured, try it first.
         if let Some(fs_url) = fs_url_opt {
+            self.throttle();
             match proxy_fetch_text(&fs_url, session_id_opt.as_deref(), url) {
-                Ok(text) => return Ok(text),
-                Err(_e) => {
-                    // fall through to direct
+                Ok(text) => {
+                    info!("FlareClient: proxied GET {}", url);
+                    return Ok(text);
+                }
+                Err(e) => {
+                    warn!("FlareClient: proxy failed for {}: {:#}", url, e);
                 }
             }
         }
 
         // Direct GET using current agent + headers
+        debug!("FlareClient: direct GET {}", url);
+        self.throttle();
         direct_get_with_headers(self, url, &default_headers)
     }
 
@@ -385,12 +431,21 @@ impl FlareClient {
 
         // Try FlareSolverr first
         if let Some(fs_url) = fs_url_opt {
-            if let Ok(body) = proxy_post_form(&fs_url, session_id_opt.as_deref(), url, form) {
-                return Ok(body);
+            self.throttle();
+            match proxy_post_form(&fs_url, session_id_opt.as_deref(), url, form) {
+                Ok(body) => {
+                    info!("FlareClient: proxied POST {}", url);
+                    return Ok(body);
+                }
+                Err(e) => {
+                    warn!("FlareClient: proxy failed for {}: {:#}", url, e);
+                }
             }
         }
 
         // Fallback to direct POST
+        debug!("FlareClient: direct POST {}", url);
+        self.throttle();
         let agent = {
             let guard = self.inner.lock().unwrap();
             guard.agent.clone()
@@ -404,6 +459,8 @@ impl FlareClient {
     }
 
     pub fn post_empty_text(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<String> {
+        self.throttle();
+
         // Snapshot default headers and agent
         let (default_headers, agent) = {
             let guard = self.inner.lock().unwrap();

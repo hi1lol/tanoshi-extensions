@@ -1,14 +1,19 @@
 mod ratelimit;
 
 use anyhow::{Result, anyhow};
+use bytes::Bytes;
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
 use log::{debug, info, warn};
 use ratelimit::RateLimiter;
 use serde_json::{Value as JsonValue, json};
-use ureq::typestate::{WithBody, WithoutBody};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-use ureq::{Cookie, http::Uri};
+use ureq::typestate::{WithBody, WithoutBody};
+use ureq::{
+    Cookie,
+    http::{Uri, header::CONTENT_TYPE},
+};
+use url::Url;
 
 pub type Agent = ureq::Agent;
 
@@ -22,10 +27,11 @@ pub struct RateLimitedAgent {
 
 impl RateLimitedAgent {
     pub fn new(inner: ureq::Agent, requests_per_second: Option<f64>) -> Self {
-        info!("Net RateLimitedAgent setup with {:?} RPS", requests_per_second);
-        let limiter = requests_per_second
-            .and_then(RateLimiter::new)
-            .map(Arc::new);
+        info!(
+            "Net RateLimitedAgent setup with {:?} RPS",
+            requests_per_second
+        );
+        let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         Self { inner, limiter }
     }
@@ -42,6 +48,14 @@ impl RateLimitedAgent {
             inner: self.inner.post(url),
             limiter: self.limiter.clone(),
         }
+    }
+    
+    pub fn fetch_bytes(&self, url: &str) -> anyhow::Result<Bytes> {
+        let mut getter = |u: &str| -> anyhow::Result<ureq::http::Response<ureq::Body>> {
+            Ok(self.get(u).image_defaults(u).call()?)
+        };
+
+        bytes_fetch_impl(&mut getter, url, 0)
     }
 }
 
@@ -85,6 +99,11 @@ impl<B> RateLimitedRequest<B> {
 
 /// Methods only available for RequestBuilder<WithoutBody>
 impl RateLimitedRequest<WithoutBody> {
+    pub fn image_defaults(self, url: &str) -> Self {
+        let inner = build_image_get(url, self.inner);
+        Self { inner, limiter: self.limiter }
+    }
+
     pub fn call(self) -> Result<HttpResponse, ureq::Error> {
         self.throttle();
         self.inner.call()
@@ -113,7 +132,6 @@ impl RateLimitedRequest<WithBody> {
         self.inner.send_json(value)
     }
 }
-
 #[allow(non_snake_case)]
 #[derive(Debug, serde::Deserialize, Clone)]
 pub struct FlareSolverrResponse {
@@ -174,7 +192,6 @@ pub fn build_rate_limited_flaresolverr_client(
     FlareClient::from_env_with_rps(origin_url, requests_per_second)
         .unwrap_or_else(|_| FlareClient::plain_with_rps(requests_per_second))
 }
-
 
 fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolverrCookie>) {
     let mut jar = agent.cookie_jar_lock();
@@ -287,9 +304,7 @@ impl FlareClient {
     }
 
     pub fn plain_with_rps(requests_per_second: Option<f64>) -> Self {
-        let limiter = requests_per_second
-            .and_then(RateLimiter::new)
-            .map(Arc::new);
+        let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         FlareClient {
             inner: Arc::new(Mutex::new(Inner {
@@ -303,9 +318,7 @@ impl FlareClient {
     }
 
     pub fn from_env_with_rps(origin_url: &str, requests_per_second: Option<f64>) -> Result<Self> {
-        let limiter = requests_per_second
-            .and_then(RateLimiter::new)
-            .map(Arc::new);
+        let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         let flaresolverr_url = std::env::var("FLARESOLVERR_URL").ok();
         debug!("FLARESOLVERR_URL={:?}", flaresolverr_url);
@@ -374,8 +387,7 @@ impl FlareClient {
 
     /// Make this never error: on any failure, return a plain client.
     pub fn from_env_or_plain(origin_url: &str) -> Self {
-        Self::from_env_with_rps(origin_url, None)
-            .unwrap_or_else(|_| Self::plain_with_rps(None))
+        Self::from_env_with_rps(origin_url, None).unwrap_or_else(|_| Self::plain_with_rps(None))
     }
 
     pub fn from_env(origin_url: &str) -> Result<Self> {
@@ -416,6 +428,71 @@ impl FlareClient {
 
     pub fn get_text(&self, url: &str) -> Result<String> {
         self.fetch_text(url)
+    }
+
+    pub fn fetch_bytes(&self, url: &str) -> Result<Bytes> {
+        self.fetch_bytes_inner(url, 0)
+    }
+
+    fn fetch_bytes_inner(&self, url: &str, depth: u8) -> Result<Bytes> {
+        if depth > 2 {
+            return Err(anyhow!(
+                "Too many wrapper hops while fetching image: {}",
+                url
+            ));
+        }
+
+        let (default_headers, agent) = {
+            let guard = self.inner.lock().unwrap();
+            (guard.default_headers.clone(), guard.agent.clone())
+        };
+
+        self.throttle();
+        let mut req = agent.get(url);
+
+        for (k, v) in default_headers.iter() {
+            req = req.header(k, v);
+        }
+
+        req = build_image_get(url, req);
+
+        let mut resp = req.call()?;
+
+        let status = resp.status();
+        if status.as_u16() >= 400 {
+            return Err(anyhow!(
+                "Image fetch failed: HTTP {} for {}",
+                status.as_u16(),
+                url
+            ));
+        }
+
+        let content_type = resp
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+
+        if content_type.starts_with("text/html") {
+            let html = resp.body_mut().read_to_string()?;
+
+            if let Some(next) = extract_first_img_src(&html) {
+                let next_url = match Url::parse(url).ok().and_then(|base| base.join(&next).ok()) {
+                    Some(u) => u.to_string(),
+                    None => next,
+                };
+                return self.fetch_bytes_inner(&next_url, depth + 1);
+            }
+
+            return Err(anyhow!(
+                "Expected image bytes but got HTML and no <img src=...> found for {}",
+                url
+            ));
+        }
+
+        let data: Vec<u8> = resp.body_mut().read_to_vec()?;
+        Ok(Bytes::from(data))
     }
 
     pub fn post_form_text(&self, url: &str, form: &[(&str, &str)]) -> Result<String> {
@@ -601,6 +678,82 @@ fn solve_with_flaresolverr(
         cookies: body.solution.cookies,
         headers: hdrs,
     })
+}
+
+const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8";
+
+fn build_image_get(
+    url: &str,
+    mut req: ureq::RequestBuilder<WithoutBody>,
+) -> ureq::RequestBuilder<WithoutBody> {
+    // Build a referer from the target URL origin
+    let referer = Url::parse(url)
+        .ok()
+        .and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h)));
+
+    req = req.header("Accept", IMAGE_ACCEPT);
+
+    if let Some(r) = referer {
+        req = req.header("Referer", r);
+    }
+
+    req
+}
+
+fn bytes_fetch_impl<F>(do_get: &mut F, url: &str, depth: u8) -> anyhow::Result<Bytes>
+where
+    F: FnMut(&str) -> anyhow::Result<ureq::http::Response<ureq::Body>>,
+{
+    if depth > 2 {
+        return Err(anyhow!("Too many wrapper hops while fetching image: {}", url));
+    }
+
+    let mut resp = do_get(url)?;
+
+    let status = resp.status();
+    if status.as_u16() >= 400 {
+        return Err(anyhow!(
+            "Image fetch failed: HTTP {} for {}",
+            status.as_u16(),
+            url
+        ));
+    }
+
+    let content_type = resp
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    if content_type.starts_with("text/html") {
+        let html = resp.body_mut().read_to_string()?;
+        if let Some(next) = extract_first_img_src(&html) {
+            let next_url = match Url::parse(url).ok().and_then(|base| base.join(&next).ok()) {
+                Some(u) => u.to_string(),
+                None => next,
+            };
+            return bytes_fetch_impl(do_get, &next_url, depth + 1);
+        }
+
+        return Err(anyhow!(
+            "Expected image bytes but got HTML and no <img src=...> found for {}",
+            url
+        ));
+    }
+
+    let data: Vec<u8> = resp.body_mut().read_to_vec()?;
+    Ok(Bytes::from(data))
+}
+
+// Tiny helper: pull the first <img ... src="..."> out of wrapper HTML.
+fn extract_first_img_src(html: &str) -> Option<String> {
+    // Look for: src="...".
+    let needle = "src=\"";
+    let start = html.find(needle)? + needle.len();
+    let rest = &html[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 #[cfg(test)]

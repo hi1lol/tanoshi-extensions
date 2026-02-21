@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use bytes::Bytes;
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
@@ -6,7 +7,7 @@ use networking::{FlareClient, build_rate_limited_flaresolverr_client};
 use scraper::{Html, Selector};
 use std::env;
 use tanoshi_lib::prelude::{
-    ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar, SourceInfo
+    ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar, SourceInfo,
 };
 use urlencoding::encode;
 
@@ -91,7 +92,7 @@ impl Default for NHentai {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND))
+            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND)),
         }
     }
 }
@@ -114,7 +115,11 @@ fn norm_value(v: &str) -> String {
 }
 
 fn normalize_url(u: &str) -> String {
-    if u.starts_with("//") { format!("https:{}", u) } else { u.to_string() }
+    if u.starts_with("//") {
+        format!("https:{}", u)
+    } else {
+        u.to_string()
+    }
 }
 
 impl NHentai {
@@ -506,9 +511,7 @@ impl Extension for NHentai {
 
         let mut pages = vec![];
         // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
-        let re = Regex::new(
-            r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$"
-        )?;
+        let re = Regex::new(r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$")?;
         for thumb in document.select(&page_selector) {
             if let Some(orig) = thumb.value().attr("data-src") {
                 // normalize protocol-relative URLs
@@ -530,7 +533,6 @@ impl Extension for NHentai {
                     }
                 }
 
-
                 pages.push(format!(
                     "https://i{}.nhentai.net/galleries/{}/{}.{}",
                     &cap[1], &cap[2], &cap[3], &ext
@@ -547,6 +549,10 @@ impl Extension for NHentai {
 
     fn filter_list(&self) -> Vec<Input> {
         FILTER_LIST.clone()
+    }
+
+    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        self.client.fetch_bytes(&url)
     }
 }
 
@@ -669,7 +675,7 @@ mod test {
 
         assert!(re.is_match(&res[0]).unwrap());
 
-        let page = "/g/624576".to_string();    
+        let page = "/g/624576".to_string();
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
         let re = Regex::new(r"https://i\d*.nhentai.net/galleries/3748415/2.webp").unwrap();

@@ -9,7 +9,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 networking = { path = "../../common/networking" }
-tanoshi-lib = "0.27.0"
+tanoshi-lib = { git = "https://github.com/luigi311/tanoshi", tag = "v0.38.0" }
 madara = { path = "../../common/madara" }
 anyhow = "1"
 lazy_static = "1"
+bytes = "1"

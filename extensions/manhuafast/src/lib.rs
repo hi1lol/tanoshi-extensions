@@ -2,8 +2,8 @@ extern crate log;
 
 use std::env;
 
-
 use anyhow::bail;
+use bytes::Bytes;
 use lazy_static::lazy_static;
 use madara::{
     get_chapters, get_latest_manga, get_manga_detail, get_pages, get_popular_manga, search_manga,
@@ -24,8 +24,8 @@ lazy_static! {
 const ID: i64 = 12;
 const NAME: &str = "ManhuaFast";
 const URL: &str = "https://manhuafast.com";
+const ICON_URL: &str = "https://manhuafast.com/wp-content/uploads/2021/01/cropped-Dark-Star-Emperor-Manga-193x278-1-192x192.jpg";
 const REQUESTS_PER_SECOND: f64 = 1.0;
-
 
 pub struct ManhuaFast {
     preferences: Vec<Input>,
@@ -36,7 +36,7 @@ impl Default for ManhuaFast {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND))
+            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND)),
         }
     }
 }
@@ -64,7 +64,7 @@ impl Extension for ManhuaFast {
             name: NAME.to_string(),
             url: URL.to_string(),
             version: env!("CARGO_PKG_VERSION"),
-            icon: "https://manhuafast.com/wp-content/uploads/2021/01/cropped-Dark-Star-Emperor-Manga-193x278-1-192x192.jpg",
+            icon: ICON_URL,
             languages: Lang::Single("en".to_string()),
             nsfw: false,
         }
@@ -101,6 +101,10 @@ impl Extension for ManhuaFast {
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         get_pages(URL, &path, &self.client)
+    }
+
+    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        self.client.fetch_bytes(&url)
     }
 }
 

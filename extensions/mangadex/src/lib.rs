@@ -6,6 +6,7 @@ use crate::dto::{
     manga::{ListOrder, Order, Rating, request},
 };
 use anyhow::{Result, anyhow, bail};
+use bytes::Bytes;
 use dto::ResultsAtHome;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
@@ -34,7 +35,6 @@ const URL: &str = "https://api.mangadex.org";
 // The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
 const REQUESTS_PER_SECOND: f64 = 3.0;
 const REQUESTS_PER_SECOND_AT_HOME: f64 = 0.6;
-
 
 pub struct Mangadex {
     preferences: Vec<Input>,
@@ -357,6 +357,10 @@ impl Extension for Mangadex {
 
     fn filter_list(&self) -> Vec<Input> {
         filter::FILTER_LIST.clone()
+    }
+
+    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        self.client.fetch_bytes(&url)
     }
 }
 

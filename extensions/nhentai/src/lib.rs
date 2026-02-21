@@ -558,8 +558,6 @@ impl Extension for NHentai {
 
 #[cfg(test)]
 mod test {
-    use log::{debug, info};
-
     use super::*;
 
     fn create_test_instance() -> NHentai {

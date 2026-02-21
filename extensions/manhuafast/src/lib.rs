@@ -115,11 +115,11 @@ mod test {
     fn create_test_instance() -> ManhuaFast {
         let preferences: Vec<Input> = vec![];
 
-        let mut ManhuaFast: ManhuaFast = ManhuaFast::default();
+        let mut manhua_fast: ManhuaFast = ManhuaFast::default();
 
-        ManhuaFast.set_preferences(preferences).unwrap();
+        manhua_fast.set_preferences(preferences).unwrap();
 
-        ManhuaFast
+        manhua_fast
     }
 
     #[test]

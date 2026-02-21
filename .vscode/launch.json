@@ -1,0 +1,100 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug unit tests in library 'manhuafast'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=manhuafast"
+                ]
+            },
+            "env": {
+                "RUST_LOG": "info",
+                "FLARESOLVERR_URL": "http://192.168.200.62:8191/v1"
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'madara'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=madara"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'networking'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=networking"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'guyalib'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=guyalib"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'mangakakalot_common'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=mangakakalot-common"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'nepnep'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=nepnep"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'wpmangareader'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=wpmangareader"
+                ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'wpmangastream'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=wpmangastream"
+                ]
+            }
+        }
+    ]
+}

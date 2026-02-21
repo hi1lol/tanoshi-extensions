@@ -1,12 +1,14 @@
+use bytes::Bytes;
 use guyalib::{get_chapters, get_manga_detail, get_manga_list, get_pages};
-use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar};
 use lazy_static::lazy_static;
-use networking::{Agent, build_ureq_agent};
+use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use std::env;
+use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar};
 
 const ID: i64 = 7;
 const NAME: &str = "Guya";
 const URL: &str = "https://guya.cubari.moe";
+const REQUESTS_PER_SECOND: f64 = 1.0;
 
 tanoshi_lib::export_plugin!(register);
 
@@ -20,23 +22,20 @@ lazy_static! {
 
 pub struct Guya {
     preferences: Vec<Input>,
-    client: Agent,
+    client: RateLimitedAgent,
 }
 
 impl Default for Guya {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_ureq_agent(None),
+            client: build_rate_limited_ureq_agent(None, Some(REQUESTS_PER_SECOND)),
         }
     }
 }
 
 impl Extension for Guya {
-    fn set_preferences(
-        &mut self,
-        preferences: Vec<Input>,
-    ) -> anyhow::Result<()> {
+    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
         for input in preferences {
             for pref in self.preferences.iter_mut() {
                 if input.eq(pref) {
@@ -103,6 +102,10 @@ impl Extension for Guya {
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         get_pages(URL, &path, &self.client)
+    }
+
+    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        self.client.fetch_bytes(&url)
     }
 }
 

@@ -57,6 +57,7 @@ pub enum Relationship {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct Home {
     pub base_url: String,
 }

@@ -252,6 +252,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b2972feb8dffe7bc8c5463b1dacda1b0dfbed3710e50f977d965429692d74cd8"
 
 [[package]]
+name = "env_filter"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a1c3cc8e57274ec99de65301228b537f1e4eedc1b8e0f9411c6caac8ae7308f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "env_logger"
+version = "0.11.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2daee4ea451f429a58296525ddf28b45a3b64f1acf6587e2067437bb11e218d"
+dependencies = [
+ "env_filter",
+ "log",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -346,9 +365,10 @@ dependencies = [
 
 [[package]]
 name = "guya"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "guyalib",
  "lazy_static",
  "networking",
@@ -385,7 +405,7 @@ checksum = "8ec3405a4163878f29357e1156eacd5c9d72803b62925f190c865d1cae8105d5"
 dependencies = [
  "html5ever",
  "tendril",
- "thiserror 2.0.17",
+ "thiserror",
  "unicode-width",
 ]
 
@@ -631,10 +651,12 @@ dependencies = [
 
 [[package]]
 name = "mangadex"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
+ "env_logger",
  "fancy-regex",
  "lazy_static",
  "log",
@@ -667,10 +689,13 @@ dependencies = [
 
 [[package]]
 name = "manhuafast"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
+ "env_logger",
  "lazy_static",
+ "log",
  "madara",
  "networking",
  "tanoshi-lib",
@@ -678,9 +703,10 @@ dependencies = [
 
 [[package]]
 name = "manhwa18cc"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "lazy_static",
  "madara",
  "networking",
@@ -747,8 +773,12 @@ name = "networking"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "cookie",
  "cookie_store",
+ "env_logger",
+ "log",
+ "once_cell",
  "serde",
  "serde_json",
  "ureq",
@@ -764,9 +794,10 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nhentai"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
  "fancy-regex",
  "lazy_static",
@@ -1221,7 +1252,7 @@ checksum = "f3faaf9e727533a19351a43cc5a8de957372163c7d35cc48c90b75cdda13c352"
 dependencies = [
  "percent-encoding",
  "serde",
- "thiserror 2.0.17",
+ "thiserror",
 ]
 
 [[package]]
@@ -1318,14 +1349,14 @@ dependencies = [
 
 [[package]]
 name = "tanoshi-lib"
-version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0162cf69067f1ff682872e8e1f48926c21321eccd02dc9778e338133c37291a5"
+version = "0.38.0"
+source = "git+https://github.com/luigi311/tanoshi?tag=v0.38.0#4642c30f88b6bb89f890311e6130578e09af4db2"
 dependencies = [
  "anyhow",
+ "bytes",
  "rustc_version",
  "serde",
- "thiserror 1.0.69",
+ "thiserror",
 ]
 
 [[package]]
@@ -1341,31 +1372,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b6aaf5339b578ea85b50e080feb250a3e8ae8cfcdff9a461c9ec2904bc923f52"
-dependencies = [
- "thiserror-impl 1.0.69",
-]
-
-[[package]]
-name = "thiserror"
 version = "2.0.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f63587ca0f12b72a0600bcba1d40081f830876000bb46dd2337a3051618f4fc8"
 dependencies = [
- "thiserror-impl 2.0.17",
-]
-
-[[package]]
-name = "thiserror-impl"
-version = "1.0.69"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fee6c4efc90059e10f81e6d42c60a18f76588c3d74cb83a0b242a2b6c7504c1"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
+ "thiserror-impl",
 ]
 
 [[package]]
@@ -1381,9 +1392,10 @@ dependencies = [
 
 [[package]]
 name = "three_sixty_five_manga"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "lazy_static",
  "madara",
  "networking",
@@ -1592,9 +1604,10 @@ dependencies = [
 
 [[package]]
 name = "weebcentral"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "chrono",
  "lazy_static",
  "networking",

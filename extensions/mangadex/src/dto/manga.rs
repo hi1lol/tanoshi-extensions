@@ -461,12 +461,14 @@ pub mod request {
 
     #[derive(Debug, Clone, Default, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]
+    #[allow(dead_code)]
     pub struct Manga {
         pub includes: Vec<String>,
     }
 
     #[derive(Debug, Clone, Default, Deserialize, Serialize)]
     #[serde(rename_all = "camelCase")]
+    #[allow(dead_code)]
     pub struct MangaFeed {
         pub limit: i64,
         pub offset: i64,

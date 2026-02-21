@@ -1,12 +1,15 @@
+extern crate log;
+
 use std::env;
 
 use anyhow::bail;
+use bytes::Bytes;
+use lazy_static::lazy_static;
 use madara::{
     get_chapters, get_latest_manga, get_manga_detail, get_pages, get_popular_manga, search_manga,
 };
+use networking::{FlareClient, build_rate_limited_flaresolverr_client};
 use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar, SourceInfo};
-use lazy_static::lazy_static;
-use networking::FlareClient;
 
 tanoshi_lib::export_plugin!(register);
 
@@ -21,6 +24,8 @@ lazy_static! {
 const ID: i64 = 12;
 const NAME: &str = "ManhuaFast";
 const URL: &str = "https://manhuafast.com";
+const ICON_URL: &str = "https://manhuafast.com/wp-content/uploads/2021/01/cropped-Dark-Star-Emperor-Manga-193x278-1-192x192.jpg";
+const REQUESTS_PER_SECOND: f64 = 1.0;
 
 pub struct ManhuaFast {
     preferences: Vec<Input>,
@@ -31,16 +36,13 @@ impl Default for ManhuaFast {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: FlareClient::from_env_or_plain(URL),
+            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND)),
         }
     }
 }
 
 impl Extension for ManhuaFast {
-    fn set_preferences(
-        &mut self,
-        preferences: Vec<Input>,
-    ) -> anyhow::Result<()> {
+    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
         for input in preferences {
             for pref in self.preferences.iter_mut() {
                 if input.eq(pref) {
@@ -62,7 +64,7 @@ impl Extension for ManhuaFast {
             name: NAME.to_string(),
             url: URL.to_string(),
             version: env!("CARGO_PKG_VERSION"),
-            icon: "https://manhuafast.com/wp-content/uploads/2021/01/cropped-Dark-Star-Emperor-Manga-193x278-1-192x192.jpg",
+            icon: ICON_URL,
             languages: Lang::Single("en".to_string()),
             nsfw: false,
         }
@@ -73,7 +75,7 @@ impl Extension for ManhuaFast {
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-        get_latest_manga(URL, ID, page,  &self.client)
+        get_latest_manga(URL, ID, page, &self.client)
     }
 
     fn search_manga(
@@ -83,22 +85,26 @@ impl Extension for ManhuaFast {
         _: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
         if let Some(query) = query {
-            search_manga(URL, ID, page, &query, false,  &self.client)
+            search_manga(URL, ID, page, &query, false, &self.client)
         } else {
             bail!("query can not be empty")
         }
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
-        get_manga_detail(URL, &path, ID,  &self.client)
+        get_manga_detail(URL, &path, ID, &self.client)
     }
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
-        get_chapters(URL, &path, ID, None,  &self.client)
+        get_chapters(URL, &path, ID, None, &self.client)
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
-        get_pages(URL, &path,  &self.client)
+        get_pages(URL, &path, &self.client)
+    }
+
+    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        self.client.fetch_bytes(&url)
     }
 }
 
@@ -109,11 +115,11 @@ mod test {
     fn create_test_instance() -> ManhuaFast {
         let preferences: Vec<Input> = vec![];
 
-        let mut ManhuaFast: ManhuaFast = ManhuaFast::default();
-        
-        ManhuaFast.set_preferences(preferences).unwrap();
+        let mut manhua_fast: ManhuaFast = ManhuaFast::default();
 
-        ManhuaFast
+        manhua_fast.set_preferences(preferences).unwrap();
+
+        manhua_fast
     }
 
     #[test]

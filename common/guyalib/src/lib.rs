@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use anyhow::Result;
 use serde_json;
 use tanoshi_lib::prelude::*;
-use networking::Agent;
+use networking::RateLimitedAgent;
 
 use crate::dto::{Detail, Series};
 
-pub fn get_manga_list(url: &str, source_id: i64, client: &Agent) -> Result<Vec<MangaInfo>> {
+pub fn get_manga_list(url: &str, source_id: i64, client: &RateLimitedAgent) -> Result<Vec<MangaInfo>> {
     let mut resp = client.get(&format!("{}/api/get_all_series", url)).call()?;
     let text = resp.body_mut().read_to_string()?;
     let results: HashMap<String, Detail> = serde_json::from_str(&text)?;
@@ -31,7 +31,7 @@ pub fn get_manga_list(url: &str, source_id: i64, client: &Agent) -> Result<Vec<M
     Ok(manga)
 }
 
-pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<MangaInfo> {
+pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &RateLimitedAgent) -> Result<MangaInfo> {
     let mut resp = client.get(&format!("{}{}", url, path)).call()?;
     let text = resp.body_mut().read_to_string()?;
     let series: Series = serde_json::from_str(&text)?;
@@ -48,7 +48,7 @@ pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &Agent) -
     })
 }
 
-pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Result<Vec<ChapterInfo>> {
+pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &RateLimitedAgent) -> Result<Vec<ChapterInfo>> {
     let mut resp = client.get(&format!("{}{}", url, path)).call()?;
     let text = resp.body_mut().read_to_string()?;
     let series: Series = serde_json::from_str(&text)?;
@@ -76,7 +76,7 @@ pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &Agent) -> Re
     Ok(chapters)
 }
 
-pub fn get_pages(url: &str, path: &str, client: &Agent) -> Result<Vec<String>> {
+pub fn get_pages(url: &str, path: &str, client: &RateLimitedAgent) -> Result<Vec<String>> {
     let split: Vec<_> = path.rsplitn(2, '/').collect();
 
     let mut resp = client.get(&format!("{}{}", url, split[1])).call()?;

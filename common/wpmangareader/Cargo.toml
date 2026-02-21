@@ -7,7 +7,7 @@ edition = "2024"
 
 [dependencies]
 networking = { path = "../networking" }
-tanoshi-lib = "0.27.0"
+tanoshi-lib = { git = "https://github.com/luigi311/tanoshi", tag = "v0.38.0" }
 chrono = "0.4"
 scraper = "0.24"
 anyhow = "1"

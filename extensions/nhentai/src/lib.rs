@@ -1,18 +1,20 @@
 use anyhow::{Result, anyhow};
+use bytes::Bytes;
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use networking::FlareClient;
+use networking::{FlareClient, build_rate_limited_flaresolverr_client};
 use scraper::{Html, Selector};
 use std::env;
 use tanoshi_lib::prelude::{
-    ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar,
+    ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar, SourceInfo,
 };
 use urlencoding::encode;
 
-pub static ID: i64 = 6;
-pub static NAME: &str = "nhentai";
-pub static URL: &str = "https://nhentai.net";
+const ID: i64 = 6;
+const NAME: &str = "nhentai";
+const URL: &str = "https://nhentai.net";
+const REQUESTS_PER_SECOND: f64 = 1.0;
 
 tanoshi_lib::export_plugin!(register);
 
@@ -83,14 +85,14 @@ lazy_static! {
 
 pub struct NHentai {
     preferences: Vec<Input>,
-    net: FlareClient,
+    client: FlareClient,
 }
 
 impl Default for NHentai {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            net: FlareClient::from_env_or_plain(URL),
+            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND)),
         }
     }
 }
@@ -113,7 +115,11 @@ fn norm_value(v: &str) -> String {
 }
 
 fn normalize_url(u: &str) -> String {
-    if u.starts_with("//") { format!("https:{}", u) } else { u.to_string() }
+    if u.starts_with("//") {
+        format!("https:{}", u)
+    } else {
+        u.to_string()
+    }
 }
 
 impl NHentai {
@@ -209,7 +215,7 @@ impl NHentai {
 
     fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
         let res = self
-            .net
+            .client
             .fetch_text(url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -278,10 +284,10 @@ impl Extension for NHentai {
         Ok(self.preferences.clone())
     }
 
-    fn get_source_info(&self) -> tanoshi_lib::prelude::SourceInfo {
-        tanoshi_lib::prelude::SourceInfo {
+    fn get_source_info(&self) -> SourceInfo {
+        SourceInfo {
             id: ID,
-            name: "NHentai".to_string(),
+            name: NAME.to_string(),
             url: URL.to_string(),
             version: env!("CARGO_PKG_VERSION"),
             icon: "https://nhentai.net/static/img/logo.14bbfa78d3d0.svg",
@@ -290,13 +296,13 @@ impl Extension for NHentai {
         }
     }
 
-    fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
         self.get_manga_list(&format!("{URL}/search/?q={q}&sort=popular&page={page}"))
     }
 
-    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
         self.get_manga_list(&format!("{URL}/search/?q={q}&page={page}"))
@@ -307,7 +313,7 @@ impl Extension for NHentai {
         page: i64,
         query: Option<String>,
         filters: Option<Vec<Input>>,
-    ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    ) -> anyhow::Result<Vec<MangaInfo>> {
         let url = if let Some(filters) = filters {
             let (q_raw, sort) = self.query_parts(Some(filters));
             let q = encode(&q_raw);
@@ -324,11 +330,11 @@ impl Extension for NHentai {
         self.get_manga_list(&url)
     }
 
-    fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
+    fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
         let url = format!("{}{}", URL, path);
         // Send the request and get the response as a string
         let res = self
-            .net
+            .client
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -450,12 +456,12 @@ impl Extension for NHentai {
         Ok(manga)
     }
 
-    fn get_chapters(&self, path: String) -> anyhow::Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
+    fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
         let url = format!("{}{}", URL, path);
 
         // Send the request and get the response as a string
         let res = self
-            .net
+            .client
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -495,7 +501,7 @@ impl Extension for NHentai {
         let url = format!("{}{}", URL, path);
 
         let res = self
-            .net
+            .client
             .fetch_text(&url)
             .map_err(|e| anyhow!(e.to_string()))?;
 
@@ -505,9 +511,7 @@ impl Extension for NHentai {
 
         let mut pages = vec![];
         // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
-        let re = Regex::new(
-            r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$"
-        )?;
+        let re = Regex::new(r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$")?;
         for thumb in document.select(&page_selector) {
             if let Some(orig) = thumb.value().attr("data-src") {
                 // normalize protocol-relative URLs
@@ -529,7 +533,6 @@ impl Extension for NHentai {
                     }
                 }
 
-
                 pages.push(format!(
                     "https://i{}.nhentai.net/galleries/{}/{}.{}",
                     &cap[1], &cap[2], &cap[3], &ext
@@ -546,6 +549,10 @@ impl Extension for NHentai {
 
     fn filter_list(&self) -> Vec<Input> {
         FILTER_LIST.clone()
+    }
+
+    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        self.client.fetch_bytes(&url)
     }
 }
 
@@ -666,10 +673,12 @@ mod test {
 
         assert!(re.is_match(&res[0]).unwrap());
 
-        let page = "/g/624576".to_string();    
+        let page = "/g/624576".to_string();
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
-        let re = Regex::new(r"https://i3.nhentai.net/galleries/3748415/2.webp").unwrap();
+        let re = Regex::new(r"https://i\d*.nhentai.net/galleries/3748415/2.webp").unwrap();
+        println!("re={:?}", re);
+        println!("res[1]={:?}", res[1]);
         assert!(re.is_match(&res[1]).unwrap());
     }
 }

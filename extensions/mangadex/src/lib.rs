@@ -33,7 +33,7 @@ const NAME: &str = "Mangadex";
 const URL: &str = "https://api.mangadex.org";
 // While api.mangadex.org has a rate limit of 5 requests per second
 // The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
-const REQUESTS_PER_SECOND: f64 = 3.0;
+const REQUESTS_PER_SECOND: f64 = 5.0;
 const REQUESTS_PER_SECOND_AT_HOME: f64 = 0.6;
 
 pub struct Mangadex {

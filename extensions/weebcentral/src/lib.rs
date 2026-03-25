@@ -22,11 +22,14 @@ lazy_static! {
 const ID: i64 = 28;
 const NAME: &str = "WeebCentral";
 const URL: &str = "https://weebcentral.com";
-const REQUESTS_PER_SECOND: f64 = 1.0;
+const REQUESTS_PER_SECOND: f64 = 10.0;
+// Get Pages seems to have its own rate limit
+const PAGES_REQUESTS_PER_SECOND: f64 = 1.0;
 
 pub struct Weebcentral {
     preferences: Vec<Input>,
     client: RateLimitedAgent,
+    client_pages: RateLimitedAgent,
 }
 
 impl Default for Weebcentral {
@@ -34,6 +37,7 @@ impl Default for Weebcentral {
         Self {
             preferences: PREFERENCES.clone(),
             client: build_rate_limited_ureq_agent(None, Some(REQUESTS_PER_SECOND)),
+            client_pages: build_rate_limited_ureq_agent(None, Some(PAGES_REQUESTS_PER_SECOND)),
         }
     }
 }
@@ -291,7 +295,7 @@ impl Extension for Weebcentral {
 
     fn get_pages(&self, path: String) -> Result<Vec<String>> {
         let mut resp = self
-            .client
+            .client_pages
             .get(&format!(
                 "{URL}{path}/images?is_prev=False&current_page=1&reading_style=single_page"
             ))

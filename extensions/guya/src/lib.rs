@@ -8,7 +8,7 @@ use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar};
 const ID: i64 = 7;
 const NAME: &str = "Guya";
 const URL: &str = "https://guya.cubari.moe";
-const REQUESTS_PER_SECOND: f64 = 1.0;
+const REQUESTS_PER_SECOND: f64 = 10.0;
 
 tanoshi_lib::export_plugin!(register);
 

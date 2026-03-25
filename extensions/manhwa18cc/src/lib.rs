@@ -20,7 +20,7 @@ lazy_static! {
 const ID: i64 = 8;
 const NAME: &str = "Manhwa18cc";
 const URL: &str = "https://manhwa18.cc";
-const REQUESTS_PER_SECOND: f64 = 1.0;
+const REQUESTS_PER_SECOND: f64 = 10.0;
 
 pub struct Manhwa18cc {
     preferences: Vec<Input>,

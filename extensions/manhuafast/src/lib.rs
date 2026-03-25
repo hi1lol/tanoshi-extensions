@@ -25,7 +25,7 @@ const ID: i64 = 12;
 const NAME: &str = "ManhuaFast";
 const URL: &str = "https://manhuafast.com";
 const ICON_URL: &str = "https://manhuafast.com/wp-content/uploads/2021/01/cropped-Dark-Star-Emperor-Manga-193x278-1-192x192.jpg";
-const REQUESTS_PER_SECOND: f64 = 1.0;
+const REQUESTS_PER_SECOND: f64 = 10.0;
 
 pub struct ManhuaFast {
     preferences: Vec<Input>,

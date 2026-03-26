@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "manhuafast"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -794,7 +794,7 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nhentai"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "three_sixty_five_manga"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "bytes",

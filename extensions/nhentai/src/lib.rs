@@ -14,7 +14,7 @@ use urlencoding::encode;
 const ID: i64 = 6;
 const NAME: &str = "nhentai";
 const URL: &str = "https://nhentai.net";
-const REQUESTS_PER_SECOND: f64 = 1.0;
+const REQUESTS_PER_SECOND: f64 = 10.0;
 
 tanoshi_lib::export_plugin!(register);
 

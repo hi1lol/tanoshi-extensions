@@ -35,7 +35,8 @@ jobs:
           # Sleep 5 seconds to wait for FlareSolverr to start
           sleep 5
 
-          FLARESOLVERR_URL="http://localhost:8191/v1" cargo test -- --test-threads=1 || true
+          FLARESOLVERR_URL="http://localhost:8191/v1" cargo test -- --test-threads=1
+          FLARESOLVERR_URL="http://localhost:8191/v1" cargo test -- --test-threads=1 --ignored
 
           # Stop FlareSolverr
           docker stop flaresolverr

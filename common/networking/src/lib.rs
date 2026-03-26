@@ -19,6 +19,8 @@ pub type Agent = ureq::Agent;
 
 pub type HttpResponse = ureq::http::Response<ureq::Body>;
 
+const LIMIT_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+
 #[derive(Clone)]
 pub struct RateLimitedAgent {
     inner: ureq::Agent,
@@ -491,7 +493,7 @@ impl FlareClient {
             ));
         }
 
-        let data: Vec<u8> = resp.body_mut().read_to_vec()?;
+        let data: Vec<u8> = resp.body_mut().with_config().limit(LIMIT_BYTES).read_to_vec()?;
         Ok(Bytes::from(data))
     }
 
@@ -742,7 +744,7 @@ where
         ));
     }
 
-    let data: Vec<u8> = resp.body_mut().read_to_vec()?;
+    let data: Vec<u8> = resp.body_mut().with_config().limit(LIMIT_BYTES).read_to_vec()?;
     Ok(Bytes::from(data))
 }
 

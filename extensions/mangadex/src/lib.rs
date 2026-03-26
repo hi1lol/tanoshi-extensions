@@ -424,4 +424,16 @@ mod test {
 
         assert!(!res.is_empty());
     }
+
+    #[test]
+    fn test_large_image() {
+        // Test downloading and saving a large image from Mangadex as they support pngs which can be larger than 10mb standard limits.
+        // https://cmdxd98sb0x3yprd.mangadex.network/data/ffc278361423df8bab7a0fff52689f0b/24-efcc5b0ee5e24f2c1ac1f15df114dbae078cb3618792308bf55a4cec7d390ae9.png
+        let mangadex = Mangadex::default();
+        let url = "https://cmdxd98sb0x3yprd.mangadex.network/data/ffc278361423df8bab7a0fff52689f0b/24-efcc5b0ee5e24f2c1ac1f15df114dbae078cb3618792308bf55a4cec7d390ae9.png"
+            .to_string();
+        let bytes = mangadex.get_image_bytes(url).unwrap();
+        assert!(!bytes.is_empty());
+        assert!(bytes.len() > 10 * 1024 * 1024); // Ensure the image is larger than 10MB
+    }
 }

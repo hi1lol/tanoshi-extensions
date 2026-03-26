@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "manhuafast"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "three_sixty_five_manga"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "bytes",

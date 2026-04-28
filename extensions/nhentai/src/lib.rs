@@ -233,7 +233,7 @@ impl NHentai {
         for gallery in document.select(&gallery_selector) {
             let cover_url = gallery
                 .select(&thumbnail_selector)
-                .flat_map(|thumbnail| thumbnail.value().attr("data-src"))
+                .flat_map(|thumbnail| thumbnail.value().attr("src"))
                 .next()
                 .map(|s| normalize_url(s))
                 .ok_or_else(|| anyhow!("cover_url not found"))?;
@@ -418,7 +418,7 @@ impl Extension for NHentai {
 
         let cover_url = document
             .select(&thumbnail_selector)
-            .flat_map(|el| el.value().attr("data-src"))
+            .flat_map(|el| el.value().attr("src"))
             .next()
             .map(|s| normalize_url(s))
             .ok_or_else(|| anyhow!("cover not found"))?;
@@ -513,7 +513,7 @@ impl Extension for NHentai {
         // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
         let re = Regex::new(r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$")?;
         for thumb in document.select(&page_selector) {
-            if let Some(orig) = thumb.value().attr("data-src") {
+            if let Some(orig) = thumb.value().attr("src") {
                 // normalize protocol-relative URLs
                 let url = if orig.starts_with("//") {
                     format!("https:{}", orig)

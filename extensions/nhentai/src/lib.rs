@@ -222,7 +222,7 @@ impl NHentai {
         let document = Html::parse_document(&res);
         let gallery_selector =
             Selector::parse(".gallery").map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
-        let thumbnail_selector =
+        let image_selector =
             Selector::parse("a > img").map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
         let path_selector =
             Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
@@ -232,7 +232,7 @@ impl NHentai {
         let mut manga_list = vec![];
         for gallery in document.select(&gallery_selector) {
             let cover_url = gallery
-                .select(&thumbnail_selector)
+                .select(&image_selector)
                 .flat_map(|thumbnail| thumbnail.value().attr("src"))
                 .next()
                 .map(|s| normalize_url(s))
@@ -514,12 +514,7 @@ impl Extension for NHentai {
         let re = Regex::new(r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$")?;
         for thumb in document.select(&page_selector) {
             if let Some(orig) = thumb.value().attr("src") {
-                // normalize protocol-relative URLs
-                let url = if orig.starts_with("//") {
-                    format!("https:{}", orig)
-                } else {
-                    orig.to_string()
-                };
+                let url = normalize_url(orig);
 
                 let cap = re
                     .captures(&url)?

@@ -222,7 +222,7 @@ impl NHentai {
         let document = Html::parse_document(&res);
         let gallery_selector =
             Selector::parse(".gallery").map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
-        let thumbnail_selector =
+        let image_selector =
             Selector::parse("a > img").map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
         let path_selector =
             Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
@@ -232,8 +232,8 @@ impl NHentai {
         let mut manga_list = vec![];
         for gallery in document.select(&gallery_selector) {
             let cover_url = gallery
-                .select(&thumbnail_selector)
-                .flat_map(|thumbnail| thumbnail.value().attr("data-src"))
+                .select(&image_selector)
+                .flat_map(|thumbnail| thumbnail.value().attr("src"))
                 .next()
                 .map(|s| normalize_url(s))
                 .ok_or_else(|| anyhow!("cover_url not found"))?;
@@ -418,7 +418,7 @@ impl Extension for NHentai {
 
         let cover_url = document
             .select(&thumbnail_selector)
-            .flat_map(|el| el.value().attr("data-src"))
+            .flat_map(|el| el.value().attr("src"))
             .next()
             .map(|s| normalize_url(s))
             .ok_or_else(|| anyhow!("cover not found"))?;
@@ -513,13 +513,8 @@ impl Extension for NHentai {
         // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
         let re = Regex::new(r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$")?;
         for thumb in document.select(&page_selector) {
-            if let Some(orig) = thumb.value().attr("data-src") {
-                // normalize protocol-relative URLs
-                let url = if orig.starts_with("//") {
-                    format!("https:{}", orig)
-                } else {
-                    orig.to_string()
-                };
+            if let Some(orig) = thumb.value().attr("src") {
+                let url = normalize_url(orig);
 
                 let cap = re
                     .captures(&url)?

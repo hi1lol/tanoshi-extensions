@@ -16,7 +16,7 @@
             },
             "env": {
                 "RUST_LOG": "info",
-                "FLARESOLVERR_URL": "http://192.168.200.62:8191/v1"
+                "FLARESOLVERR_URL": "http://localhost:8191/v1"
             }
         },
         {
@@ -39,6 +39,21 @@
                     "test",
                     "--package=networking"
                 ]
+            }
+        },
+        {
+            "name": "Debug unit tests in library 'nhentai'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--package=nhentai"
+                ]
+            },
+            "env": {
+                "RUST_LOG": "info",
+                "FLARESOLVERR_URL": "http://localhost:8191/v1"
             }
         },
         {

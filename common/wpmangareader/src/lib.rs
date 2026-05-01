@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::{NaiveDateTime, Utc};
 use networking::Agent;
 use scraper::{ElementRef, Html, Selector};

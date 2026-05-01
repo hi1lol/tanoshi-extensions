@@ -536,6 +536,10 @@ mod test {
 
         let manga_list: MangaList = input.into();
         let query = manga_list.to_query_string().unwrap();
-        assert_eq!("limit=0&offset=0&status[0]=ongoing&status[1]=completed&status[2]=hiatus&status[3]=cancelled&contentRating[0]=safe&contentRating[1]=suggestive&contentRating[2]=erotica&contentRating[3]=pornographic&includes[0]=cover_art&includes[1]=author&includes[2]=artist&includes[3]=scanlation_group", query, "expected got {query}");
+        assert_eq!(
+            "limit=0&offset=0&status[0]=ongoing&status[1]=completed&status[2]=hiatus&status[3]=cancelled&contentRating[0]=safe&contentRating[1]=suggestive&contentRating[2]=erotica&contentRating[3]=pornographic&includes[0]=cover_art&includes[1]=author&includes[2]=artist&includes[3]=scanlation_group",
+            query,
+            "expected got {query}"
+        );
     }
 }

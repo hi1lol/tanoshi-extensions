@@ -2,13 +2,17 @@ mod dto;
 use std::collections::HashMap;
 
 use anyhow::Result;
+use networking::RateLimitedAgent;
 use serde_json;
 use tanoshi_lib::prelude::*;
-use networking::RateLimitedAgent;
 
 use crate::dto::{Detail, Series};
 
-pub fn get_manga_list(url: &str, source_id: i64, client: &RateLimitedAgent) -> Result<Vec<MangaInfo>> {
+pub fn get_manga_list(
+    url: &str,
+    source_id: i64,
+    client: &RateLimitedAgent,
+) -> Result<Vec<MangaInfo>> {
     let mut resp = client.get(&format!("{}/api/get_all_series", url)).call()?;
     let text = resp.body_mut().read_to_string()?;
     let results: HashMap<String, Detail> = serde_json::from_str(&text)?;
@@ -31,7 +35,12 @@ pub fn get_manga_list(url: &str, source_id: i64, client: &RateLimitedAgent) -> R
     Ok(manga)
 }
 
-pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &RateLimitedAgent) -> Result<MangaInfo> {
+pub fn get_manga_detail(
+    url: &str,
+    path: &str,
+    source_id: i64,
+    client: &RateLimitedAgent,
+) -> Result<MangaInfo> {
     let mut resp = client.get(&format!("{}{}", url, path)).call()?;
     let text = resp.body_mut().read_to_string()?;
     let series: Series = serde_json::from_str(&text)?;
@@ -48,7 +57,12 @@ pub fn get_manga_detail(url: &str, path: &str, source_id: i64, client: &RateLimi
     })
 }
 
-pub fn get_chapters(url: &str, path: &str, source_id: i64, client: &RateLimitedAgent) -> Result<Vec<ChapterInfo>> {
+pub fn get_chapters(
+    url: &str,
+    path: &str,
+    source_id: i64,
+    client: &RateLimitedAgent,
+) -> Result<Vec<ChapterInfo>> {
     let mut resp = client.get(&format!("{}{}", url, path)).call()?;
     let text = resp.body_mut().read_to_string()?;
     let series: Series = serde_json::from_str(&text)?;

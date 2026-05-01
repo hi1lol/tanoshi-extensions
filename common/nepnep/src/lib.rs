@@ -2,7 +2,7 @@ mod dto;
 
 use std::collections::HashSet;
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use fancy_regex::Regex;
 use networking::Agent;
 use scraper::{Html, Selector};
@@ -234,11 +234,7 @@ fn sort_popular(dirs: &mut Vec<Dir>, asc: bool) {
     dirs.sort_by(|a, b| {
         let v_a = a.v.parse::<i32>().unwrap_or_default();
         let v_b = b.v.parse::<i32>().unwrap_or_default();
-        if asc {
-            v_a.cmp(&v_b)
-        } else {
-            v_b.cmp(&v_a)
-        }
+        if asc { v_a.cmp(&v_b) } else { v_b.cmp(&v_a) }
     });
 }
 
@@ -260,11 +256,7 @@ fn sort_year_released(dirs: &mut Vec<Dir>, asc: bool) {
     dirs.sort_by(|a, b| {
         let y_a = a.y.parse::<i32>().unwrap_or_default();
         let y_b = b.y.parse::<i32>().unwrap_or_default();
-        if asc {
-            y_a.cmp(&y_b)
-        } else {
-            y_b.cmp(&y_a)
-        }
+        if asc { y_a.cmp(&y_b) } else { y_b.cmp(&y_a) }
     });
 }
 

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use chrono::{NaiveDateTime, Utc, DateTime};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
 use networking::{FlareClient, RateLimitedAgent};
@@ -267,6 +267,48 @@ pub fn get_manga_detail<C: DetailClient>(
     })
 }
 
+fn parse_chapter_time(s: &str) -> Option<NaiveDateTime> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Try absolute formats first
+    let with_time = format!("{} 00:00", s);
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&with_time, "%B %d, %Y %H:%M") {
+        return Some(dt);
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&with_time, "%d %b %Y %H:%M") {
+        return Some(dt);
+    }
+
+    // Try relative formats: "N <unit> ago"
+    let lower = s.to_lowercase();
+    let parts: Vec<&str> = lower.split_whitespace().collect();
+    if parts.len() >= 3 && parts.last() == Some(&"ago") {
+        // Handle "a minute ago", "an hour ago" etc.
+        let n: i64 = match parts[0] {
+            "a" | "an" => 1,
+            other => other.parse().ok()?,
+        };
+        let unit = parts[1].trim_end_matches('s'); // strip plural
+        let now = Utc::now().naive_utc();
+        let dt = match unit {
+            "second" => now - Duration::seconds(n),
+            "minute" | "min" => now - Duration::minutes(n),
+            "hour" | "hr"    => now - Duration::hours(n),
+            "day"            => now - Duration::days(n),
+            "week"           => now - Duration::weeks(n),
+            "month"          => now - Duration::days(n * 30),
+            "year"           => now - Duration::days(n * 365),
+            _ => return None,
+        };
+        return Some(dt);
+    }
+
+    None
+}
+
 fn parse_chapters(
     url: &str,
     doc: &Html,
@@ -286,26 +328,31 @@ fn parse_chapters(
                 .join("")
                 .trim()
                 .to_string();
-            let chapter_time = el
-                .select(selector_chapter_time)
-                .flat_map(|el| el.text())
-                .collect::<Vec<&str>>()
-                .join("");
-            let chapter_time = format!("{} 00:00", chapter_time.trim());
+            
+            let chapter_time_el = el.select(selector_chapter_time).next();
 
-            let uploaded = if let Ok(dt) =
-                NaiveDateTime::parse_from_str(&chapter_time, "%B %d, %Y %H:%M")
-            {
-                dt
-            } else if let Ok(dt) =
-                NaiveDateTime::parse_from_str(&chapter_time, "%d %b %Y %H:%M")
-            {
-                dt
-            } else {
-                DateTime::<Utc>::from_timestamp(0, 0).unwrap().naive_utc()
-            }
-            .and_utc()
-            .timestamp();
+            // Try inner text first; if empty, fall back to the title attr of a child <a>
+            let raw_time = chapter_time_el
+                .map(|e| {
+                    let text = e.text().collect::<String>().trim().to_string();
+                    if !text.is_empty() {
+                        text
+                    } else {
+                        // Look for a child <a> with a title attribute (e.g. c-new-tag)
+                        e.select(&Selector::parse("a[title]").unwrap())
+                            .next()
+                            .and_then(|a| a.value().attr("title"))
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    }
+                })
+                .unwrap_or_default();
+
+            let uploaded = parse_chapter_time(&raw_time)
+                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap().naive_utc())
+                .and_utc()
+                .timestamp();
 
             ChapterInfo {
                 source_id,
@@ -392,6 +439,7 @@ pub fn get_chapters(
 
     let selector_chapter_time = Selector::parse(".chapter-release-date")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
+
 
     parse_chapters(
         url,

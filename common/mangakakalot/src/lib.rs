@@ -1,9 +1,9 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use fancy_regex::Regex;
+use networking::Agent;
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
-use networking::Agent;
 
 const URL: &str = "https://chapmanganato.to";
 
@@ -123,7 +123,9 @@ pub fn get_manga_detail(path: &str, source_id: i64, client: &Agent) -> Result<Ma
         status: None,
         description: doc.select(&selector_desc).next().map(|el| {
             let text = el.inner_html().trim().to_owned();
-            html2text::from_read(text.as_bytes(), 1000).expect("Failed to convert HTML to text").replace("### Description :\n\n", "")
+            html2text::from_read(text.as_bytes(), 1000)
+                .expect("Failed to convert HTML to text")
+                .replace("### Description :\n\n", "")
         }),
         path: path.to_string(),
         cover_url: doc

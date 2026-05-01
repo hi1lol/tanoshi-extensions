@@ -1,8 +1,8 @@
-use anyhow::{anyhow, Result};
-use chrono::{NaiveDateTime, Utc, DateTime};
+use anyhow::{Result, anyhow};
+use chrono::{DateTime, Duration, NaiveDateTime, Utc};
+use networking::{FlareClient, RateLimitedAgent};
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
-use networking::{FlareClient, RateLimitedAgent};
 
 // A trait to abstract over different HTTP clients for fetching manga details.
 pub trait DetailClient {
@@ -89,7 +89,12 @@ pub fn parse_manga_list(
     Ok(manga)
 }
 
-pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &FlareClient) -> Result<Vec<MangaInfo>> {
+pub fn get_latest_manga(
+    url: &str,
+    source_id: i64,
+    page: i64,
+    client: &FlareClient,
+) -> Result<Vec<MangaInfo>> {
     let form: &[(&str, &str)] = &[
         ("action", "madara_load_more"),
         ("page", &(page - 1).to_string()),
@@ -107,10 +112,7 @@ pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &FlareClie
         ("vars[meta_query][0][value]", "manga"),
     ];
 
-    let body = client.post_form_text(
-        &format!("{}/wp-admin/admin-ajax.php", url),
-        form,
-    )?;
+    let body = client.post_form_text(&format!("{}/wp-admin/admin-ajax.php", url), form)?;
 
     let selector = Selector::parse("div.page-item-detail")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -118,7 +120,12 @@ pub fn get_latest_manga(url: &str, source_id: i64, page: i64, client: &FlareClie
     parse_manga_list(url, source_id, &body, &selector, false)
 }
 
-pub fn get_popular_manga(url: &str, source_id: i64, page: i64, client: &FlareClient) -> Result<Vec<MangaInfo>> {
+pub fn get_popular_manga(
+    url: &str,
+    source_id: i64,
+    page: i64,
+    client: &FlareClient,
+) -> Result<Vec<MangaInfo>> {
     let form: &[(&str, &str)] = &[
         ("action", "madara_load_more"),
         ("page", &(page - 1).to_string()),
@@ -136,10 +143,7 @@ pub fn get_popular_manga(url: &str, source_id: i64, page: i64, client: &FlareCli
         ("vars[meta_query][0][value]", "manga"),
     ];
 
-    let body = client.post_form_text(
-        &format!("{}/wp-admin/admin-ajax.php", url),
-        form,
-    )?;
+    let body = client.post_form_text(&format!("{}/wp-admin/admin-ajax.php", url), form)?;
 
     let selector = Selector::parse("div.page-item-detail")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -152,7 +156,7 @@ pub fn search_manga_old(
     source_id: i64,
     page: i64,
     query: &str,
-    client: &RateLimitedAgent
+    client: &RateLimitedAgent,
 ) -> Result<Vec<MangaInfo>> {
     let mut resp = client
         .get(&format!("{}/search?q={}&page={}", url, query, page))
@@ -171,7 +175,7 @@ pub fn search_manga(
     page: i64,
     query: &str,
     is_selector_url: bool,
-    client: &FlareClient
+    client: &FlareClient,
 ) -> Result<Vec<MangaInfo>> {
     let form: &[(&str, &str)] = &[
         ("action", "madara_load_more"),
@@ -189,10 +193,7 @@ pub fn search_manga(
         ("page", &(page - 1).to_string()),
     ];
 
-    let body = client.post_form_text(
-        &format!("{}/wp-admin/admin-ajax.php", url),
-        form,
-    )?;
+    let body = client.post_form_text(&format!("{}/wp-admin/admin-ajax.php", url), form)?;
 
     let selector = if is_selector_url {
         Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?
@@ -267,6 +268,48 @@ pub fn get_manga_detail<C: DetailClient>(
     })
 }
 
+fn parse_chapter_time(s: &str) -> Option<NaiveDateTime> {
+    let s = s.trim();
+    if s.is_empty() {
+        return None;
+    }
+
+    // Try absolute formats first
+    let with_time = format!("{} 00:00", s);
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&with_time, "%B %d, %Y %H:%M") {
+        return Some(dt);
+    }
+    if let Ok(dt) = NaiveDateTime::parse_from_str(&with_time, "%d %b %Y %H:%M") {
+        return Some(dt);
+    }
+
+    // Try relative formats: "N <unit> ago"
+    let lower = s.to_lowercase();
+    let parts: Vec<&str> = lower.split_whitespace().collect();
+    if parts.len() >= 3 && parts.last() == Some(&"ago") {
+        // Handle "a minute ago", "an hour ago" etc.
+        let n: i64 = match parts[0] {
+            "a" | "an" => 1,
+            other => other.parse().ok()?,
+        };
+        let unit = parts[1].trim_end_matches('s'); // strip plural
+        let now = Utc::now().naive_utc();
+        let dt = match unit {
+            "second" => now - Duration::seconds(n),
+            "minute" | "min" => now - Duration::minutes(n),
+            "hour" | "hr" => now - Duration::hours(n),
+            "day" => now - Duration::days(n),
+            "week" => now - Duration::weeks(n),
+            "month" => now - Duration::days(n * 30),
+            "year" => now - Duration::days(n * 365),
+            _ => return None,
+        };
+        return Some(dt);
+    }
+
+    None
+}
+
 fn parse_chapters(
     url: &str,
     doc: &Html,
@@ -286,26 +329,31 @@ fn parse_chapters(
                 .join("")
                 .trim()
                 .to_string();
-            let chapter_time = el
-                .select(selector_chapter_time)
-                .flat_map(|el| el.text())
-                .collect::<Vec<&str>>()
-                .join("");
-            let chapter_time = format!("{} 00:00", chapter_time.trim());
 
-            let uploaded = if let Ok(dt) =
-                NaiveDateTime::parse_from_str(&chapter_time, "%B %d, %Y %H:%M")
-            {
-                dt
-            } else if let Ok(dt) =
-                NaiveDateTime::parse_from_str(&chapter_time, "%d %b %Y %H:%M")
-            {
-                dt
-            } else {
-                DateTime::<Utc>::from_timestamp(0, 0).unwrap().naive_utc()
-            }
-            .and_utc()
-            .timestamp();
+            let chapter_time_el = el.select(selector_chapter_time).next();
+
+            // Try inner text first; if empty, fall back to the title attr of a child <a>
+            let raw_time = chapter_time_el
+                .map(|e| {
+                    let text = e.text().collect::<String>().trim().to_string();
+                    if !text.is_empty() {
+                        text
+                    } else {
+                        // Look for a child <a> with a title attribute (e.g. c-new-tag)
+                        e.select(&Selector::parse("a[title]").unwrap())
+                            .next()
+                            .and_then(|a| a.value().attr("title"))
+                            .unwrap_or("")
+                            .trim()
+                            .to_string()
+                    }
+                })
+                .unwrap_or_default();
+
+            let uploaded = parse_chapter_time(&raw_time)
+                .unwrap_or_else(|| DateTime::<Utc>::from_timestamp(0, 0).unwrap().naive_utc())
+                .and_utc()
+                .timestamp();
 
             ChapterInfo {
                 source_id,
@@ -334,7 +382,12 @@ fn parse_chapters(
     Ok(chapters)
 }
 
-pub fn get_chapters_old(url: &str, path: &str, source_id: i64, client: &RateLimitedAgent) -> Result<Vec<ChapterInfo>> {
+pub fn get_chapters_old(
+    url: &str,
+    path: &str,
+    source_id: i64,
+    client: &RateLimitedAgent,
+) -> Result<Vec<ChapterInfo>> {
     let mut resp = client.get(&format!("{}{}", url, path)).call()?;
     let body = resp.body_mut().read_to_string()?;
 
@@ -368,7 +421,7 @@ pub fn get_chapters(
     path: &str,
     source_id: i64,
     chapter_name_selector: Option<&str>,
-    client: &FlareClient
+    client: &FlareClient,
 ) -> Result<Vec<ChapterInfo>> {
     let body = client.post_empty_text(
         &format!("{}{}ajax/chapters", url, path),
@@ -405,18 +458,14 @@ pub fn get_chapters(
 }
 
 pub fn get_pages(url: &str, path: &str, client: &FlareClient) -> Result<Vec<String>> {
-    let body = client.post_empty_text(
-        &format!("{}{}", url, path),
-        &[
-            ("Referer", url),
-        ],
-    )?;
+    let body = client.post_empty_text(&format!("{}{}", url, path), &[("Referer", url)])?;
 
     let doc = Html::parse_document(&body);
 
-    let selector =
-        Selector::parse(r#"div.page-break, li.blocks-gallery-item, reading-content, div.theimage, img"#)
-            .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
+    let selector = Selector::parse(
+        r#"div.page-break, li.blocks-gallery-item, reading-content, div.theimage, img"#,
+    )
+    .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
     Ok(doc
         .select(&selector)

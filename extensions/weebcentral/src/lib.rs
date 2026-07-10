@@ -347,3 +347,127 @@ impl Extension for Weebcentral {
         self.client.fetch_bytes(&url)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    // Planetes: completed series, so the values asserted below are stable.
+    const MANGA_PATH: &str = "/series/01J76XY8K8BPR60XQNGPTEJ767";
+
+    fn create_test_instance() -> Weebcentral {
+        let preferences: Vec<Input> = vec![];
+
+        let mut weebcentral: Weebcentral = Weebcentral::default();
+
+        weebcentral.set_preferences(preferences).unwrap();
+
+        weebcentral
+    }
+
+    #[test]
+    fn test_get_latest_manga() {
+        let weebcentral = create_test_instance();
+
+        let res1 = weebcentral.get_latest_manga(1).unwrap();
+        assert!(!res1.is_empty());
+
+        let res2 = weebcentral.get_latest_manga(2).unwrap();
+        assert!(!res2.is_empty());
+
+        assert_ne!(
+            res1[0].path, res2[0].path,
+            "{} should be different than {}",
+            res1[0].path, res2[0].path
+        );
+    }
+
+    #[test]
+    fn test_get_popular_manga() {
+        let weebcentral = create_test_instance();
+
+        let res = weebcentral.get_popular_manga(1).unwrap();
+        assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_search_manga() {
+        let weebcentral = create_test_instance();
+
+        let res = weebcentral
+            .search_manga(1, Some("planetes".to_string()), None)
+            .unwrap();
+
+        assert!(!res.is_empty());
+        assert!(
+            res.iter().any(|m| m.path == MANGA_PATH),
+            "search results should contain {}, got {:?}",
+            MANGA_PATH,
+            res.iter().map(|m| m.path.clone()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_get_manga_detail() {
+        let weebcentral = create_test_instance();
+
+        let res = weebcentral
+            .get_manga_detail(MANGA_PATH.to_string())
+            .unwrap();
+
+        assert_eq!(res.title, "Planetes");
+
+        // The fields below come from sidebar sections located by their
+        // <strong> label text, so they double as label-parsing tests.
+        assert!(
+            res.author.iter().any(|a| a.contains("Makoto")),
+            "author should be parsed from the Author(s) section, got {:?}",
+            res.author
+        );
+        assert!(
+            res.genre.iter().any(|g| g == "Sci-fi"),
+            "genre should be parsed from the Tags(s) section, got {:?}",
+            res.genre
+        );
+        assert_eq!(
+            res.status.as_deref(),
+            Some("Complete"),
+            "status should be parsed from the Status section"
+        );
+    }
+
+    #[test]
+    fn test_get_chapters() {
+        let weebcentral = create_test_instance();
+
+        let res = weebcentral.get_chapters(MANGA_PATH.to_string()).unwrap();
+
+        assert!(!res.is_empty());
+        assert!(
+            res.iter().all(|c| c.path.starts_with("/chapters/")),
+            "chapter paths should look like /chapters/<id>"
+        );
+        let uploaded_count = res.iter().filter(|c| c.uploaded > 0).count();
+        assert!(
+            uploaded_count * 2 >= res.len(),
+            "at least half of upload dates should parse instead of falling back to epoch 0; got {uploaded_count}/{}",
+            res.len()
+        );
+    }
+
+    #[test]
+    fn test_get_pages() {
+        let weebcentral = create_test_instance();
+
+        let chapters = weebcentral.get_chapters(MANGA_PATH.to_string()).unwrap();
+        let chapter = chapters.first().expect("chapter list should not be empty");
+
+        let res = weebcentral.get_pages(chapter.path.clone()).unwrap();
+        assert!(!res.is_empty());
+        assert!(
+            res.iter().all(|p| p.starts_with("http")),
+            "pages should be absolute image urls, got {:?}",
+            res.first()
+        );
+    }
+}

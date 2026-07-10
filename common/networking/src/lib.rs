@@ -519,69 +519,88 @@ impl FlareClient {
     ///      future requests skip straight to the proxy, then proxy this request.
     ///   4. After a cooldown, try the direct path again.
     pub fn fetch_text(&self, url: &str) -> Result<String> {
+        self.request_with_ladder(
+            "GET",
+            url,
+            |client, request_url| client.try_direct_get(request_url),
+            |fs_url, session_id, request_url| proxy_fetch_text(fs_url, session_id, request_url),
+        )
+    }
+
+    fn request_with_ladder<D, P>(
+        &self,
+        method: &str,
+        url: &str,
+        direct_request: D,
+        proxy_request: P,
+    ) -> Result<String>
+    where
+        D: Fn(&Self, &str) -> Result<DirectResult>,
+        P: Fn(&str, Option<&str>, &str) -> Result<String>,
+    {
         let (should_try_direct, has_fs) = self.direct_path_state();
 
         if should_try_direct {
-            // --- Attempt 1: direct GET with current agent ---
-            debug!("FlareClient: direct GET {}", url);
+            debug!("FlareClient: direct {} {}", method, url);
             self.throttle();
-            match self.try_direct_get(url) {
+            match direct_request(self, url) {
                 Ok(DirectResult::Success(text)) => {
-                    debug!("FlareClient: direct GET succeeded for {}", url);
+                    debug!("FlareClient: direct {} succeeded for {}", method, url);
                     return Ok(text);
                 }
                 Ok(DirectResult::Challenged(status)) => {
                     info!(
-                        "FlareClient: direct GET got challenged (HTTP {}) for {}",
-                        status, url
+                        "FlareClient: direct {} got challenged (HTTP {}) for {}",
+                        method, status, url
                     );
                 }
                 Ok(DirectResult::HttpError(status)) => {
                     return Err(anyhow!(
-                        "FlareClient: direct GET returned HTTP {} for {}",
+                        "FlareClient: direct {} returned HTTP {} for {}",
+                        method,
                         status,
                         url
                     ));
                 }
                 Err(e) => {
-                    warn!("FlareClient: direct GET failed for {}: {:#}", url, e);
+                    warn!("FlareClient: direct {} failed for {}: {:#}", method, url, e);
                     return Err(e);
                 }
             }
 
-            // --- Attempt 2: re-solve, then retry direct GET ---
             match self.re_solve() {
                 Ok(true) => {
                     debug!(
-                        "FlareClient: retrying direct GET after re-solve for {}",
-                        url
+                        "FlareClient: retrying direct {} after re-solve for {}",
+                        method, url
                     );
                     self.throttle();
-                    match self.try_direct_get(url) {
+                    match direct_request(self, url) {
                         Ok(DirectResult::Success(text)) => {
                             info!(
-                                "FlareClient: direct GET succeeded after re-solve for {}",
-                                url
+                                "FlareClient: direct {} succeeded after re-solve for {}",
+                                method, url
                             );
                             return Ok(text);
                         }
                         Ok(DirectResult::Challenged(status)) => {
                             warn!(
-                                "FlareClient: still challenged (HTTP {}) after re-solve for {}",
-                                status, url
+                                "FlareClient: still challenged (HTTP {}) after re-solve for {} {}",
+                                status, method, url
                             );
                         }
                         Ok(DirectResult::HttpError(status)) => {
                             return Err(anyhow!(
-                                "FlareClient: direct GET returned HTTP {} after re-solve for {}",
+                                "FlareClient: direct {} returned HTTP {} after re-solve for {}",
+                                method,
                                 status,
                                 url
                             ));
                         }
                         Err(e) => {
                             warn!(
-                                "FlareClient: direct GET failed after re-solve for {}: {:#}",
-                                url, e
+                                "FlareClient: direct {} failed after re-solve for {}: {:#}",
+                                method, url, e
                             );
                             return Err(e);
                         }
@@ -590,14 +609,12 @@ impl FlareClient {
                 Ok(false) => {}
                 Err(e) => {
                     warn!(
-                        "FlareClient: re-solve failed after direct GET challenge for {}: {:#}",
-                        url, e
+                        "FlareClient: re-solve failed after direct {} challenge for {}: {:#}",
+                        method, url, e
                     );
                 }
             }
 
-            // Direct path exhausted — mark it as non-working so future
-            // requests skip straight to the proxy.
             if has_fs {
                 info!(
                     "FlareClient: direct path failed, switching to proxy-only for future requests"
@@ -606,24 +623,27 @@ impl FlareClient {
             }
         }
 
-        // --- Proxy path (either first attempt or fallback) ---
         let (fs_url_opt, session_id_opt) = {
             let guard = self.inner.lock().unwrap();
             (guard.flaresolverr_url.clone(), guard.session_id.clone())
         };
 
         if let Some(fs_url) = fs_url_opt {
-            debug!("FlareClient: proxy GET {}", url);
+            debug!("FlareClient: proxy {} {}", method, url);
             self.throttle();
-            match proxy_fetch_text(&fs_url, session_id_opt.as_deref(), url) {
+            match proxy_request(&fs_url, session_id_opt.as_deref(), url) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
-                    warn!("FlareClient: proxy failed for {}: {:#}", url, e);
+                    warn!("FlareClient: proxy {} failed for {}: {:#}", method, url, e);
                 }
             }
         }
 
-        Err(anyhow!("FlareClient: all attempts failed for {}", url))
+        Err(anyhow!(
+            "FlareClient: all {} attempts failed for {}",
+            method,
+            url
+        ))
     }
 
     /// Try a direct GET and classify the result.
@@ -636,17 +656,7 @@ impl FlareClient {
         let req = default_headers
             .iter()
             .fold(agent.get(url), |req, (k, v)| req.header(k, v));
-        let mut resp = req.call()?;
-        let status = resp.status().as_u16();
-        let body = resp.body_mut().read_to_string()?;
-
-        if looks_like_cf_challenge(status, &body) {
-            Ok(DirectResult::Challenged(status))
-        } else if status >= 400 {
-            Ok(DirectResult::HttpError(status))
-        } else {
-            Ok(DirectResult::Success(body))
-        }
+        classify_direct_response(req.call()?)
     }
 
     pub fn get_text(&self, url: &str) -> Result<String> {
@@ -750,112 +760,15 @@ impl FlareClient {
         Ok(Bytes::from(data))
     }
 
-    /// Same direct-first strategy as fetch_text, but for POST with form data.
     pub fn post_form_text(&self, url: &str, form: &[(&str, &str)]) -> Result<String> {
-        let (should_try_direct, has_fs) = self.direct_path_state();
-
-        if should_try_direct {
-            // --- Attempt 1: direct POST ---
-            debug!("FlareClient: direct POST {}", url);
-            self.throttle();
-            match self.try_direct_post_form(url, form) {
-                Ok(DirectResult::Success(text)) => {
-                    debug!("FlareClient: direct POST succeeded for {}", url);
-                    return Ok(text);
-                }
-                Ok(DirectResult::Challenged(status)) => {
-                    info!(
-                        "FlareClient: direct POST got challenged (HTTP {}) for {}",
-                        status, url
-                    );
-                }
-                Ok(DirectResult::HttpError(status)) => {
-                    return Err(anyhow!(
-                        "FlareClient: direct POST returned HTTP {} for {}",
-                        status,
-                        url
-                    ));
-                }
-                Err(e) => {
-                    warn!("FlareClient: direct POST failed for {}: {:#}", url, e);
-                    return Err(e);
-                }
-            }
-
-            // --- Attempt 2: re-solve, then retry direct POST ---
-            match self.re_solve() {
-                Ok(true) => {
-                    debug!(
-                        "FlareClient: retrying direct POST after re-solve for {}",
-                        url
-                    );
-                    self.throttle();
-                    match self.try_direct_post_form(url, form) {
-                        Ok(DirectResult::Success(text)) => {
-                            info!(
-                                "FlareClient: direct POST succeeded after re-solve for {}",
-                                url
-                            );
-                            return Ok(text);
-                        }
-                        Ok(DirectResult::Challenged(status)) => {
-                            warn!(
-                                "FlareClient: still challenged (HTTP {}) after re-solve for POST {}",
-                                status, url
-                            );
-                        }
-                        Ok(DirectResult::HttpError(status)) => {
-                            return Err(anyhow!(
-                                "FlareClient: direct POST returned HTTP {} after re-solve for {}",
-                                status,
-                                url
-                            ));
-                        }
-                        Err(e) => {
-                            warn!(
-                                "FlareClient: direct POST failed after re-solve for {}: {:#}",
-                                url, e
-                            );
-                            return Err(e);
-                        }
-                    }
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    warn!(
-                        "FlareClient: re-solve failed after direct POST challenge for {}: {:#}",
-                        url, e
-                    );
-                }
-            }
-
-            // Direct path exhausted
-            if has_fs {
-                info!(
-                    "FlareClient: direct POST path failed, switching to proxy-only for future requests"
-                );
-                self.disable_direct_path();
-            }
-        }
-
-        // --- Proxy path ---
-        let (fs_url_opt, session_id_opt) = {
-            let guard = self.inner.lock().unwrap();
-            (guard.flaresolverr_url.clone(), guard.session_id.clone())
-        };
-
-        if let Some(fs_url) = fs_url_opt {
-            debug!("FlareClient: proxy POST {}", url);
-            self.throttle();
-            match proxy_post_form(&fs_url, session_id_opt.as_deref(), url, form) {
-                Ok(body) => return Ok(body),
-                Err(e) => {
-                    warn!("FlareClient: proxy POST failed for {}: {:#}", url, e);
-                }
-            }
-        }
-
-        Err(anyhow!("FlareClient: all POST attempts failed for {}", url))
+        self.request_with_ladder(
+            "POST",
+            url,
+            |client, request_url| client.try_direct_post_form(request_url, form),
+            |fs_url, session_id, request_url| {
+                proxy_post_form(fs_url, session_id, request_url, form)
+            },
+        )
     }
 
     /// Try a direct POST with form data and classify the result.
@@ -869,42 +782,52 @@ impl FlareClient {
         for (k, v) in default_headers.iter() {
             req = req.header(k, v);
         }
-        let mut resp = req.send_form(form.iter().copied())?;
-        let status = resp.status().as_u16();
-        let body = resp.body_mut().read_to_string()?;
-
-        if looks_like_cf_challenge(status, &body) {
-            Ok(DirectResult::Challenged(status))
-        } else if status >= 400 {
-            Ok(DirectResult::HttpError(status))
-        } else {
-            Ok(DirectResult::Success(body))
-        }
+        classify_direct_response(req.send_form(form.iter().copied())?)
     }
 
-    pub fn post_empty_text(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<String> {
-        self.throttle();
-
-        // Snapshot default headers and agent
+    fn try_direct_post_empty(
+        &self,
+        url: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<DirectResult> {
         let (default_headers, agent) = {
             let guard = self.inner.lock().unwrap();
             (guard.default_headers.clone(), guard.agent.clone())
         };
 
         let mut req = agent.post(url);
-
-        // default_headers: Vec<(String, String)>
         for (k, v) in default_headers.iter() {
-            req = req.header(k, v); // &String → &str via Deref
+            req = req.header(k, v);
         }
-
-        // extra_headers: &[(&str, &str)]
         for (k, v) in extra_headers.iter() {
-            req = req.header(*k, *v); // &(&str) → &str
+            req = req.header(*k, *v);
         }
 
-        let mut resp = req.send_empty()?;
-        Ok(resp.body_mut().read_to_string()?)
+        classify_direct_response(req.send_empty()?)
+    }
+
+    pub fn post_empty_text(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<String> {
+        // FlareSolverr's request.post proxy leg cannot carry these per-request
+        // headers, so they apply only to the direct request.
+        self.request_with_ladder(
+            "POST",
+            url,
+            |client, request_url| client.try_direct_post_empty(request_url, extra_headers),
+            |fs_url, session_id, request_url| proxy_post_empty(fs_url, session_id, request_url),
+        )
+    }
+}
+
+fn classify_direct_response(mut resp: HttpResponse) -> Result<DirectResult> {
+    let status = resp.status().as_u16();
+    let body = resp.body_mut().read_to_string()?;
+
+    if looks_like_cf_challenge(status, &body) {
+        Ok(DirectResult::Challenged(status))
+    } else if status >= 400 {
+        Ok(DirectResult::HttpError(status))
+    } else {
+        Ok(DirectResult::Success(body))
     }
 }
 
@@ -960,6 +883,34 @@ fn proxy_post_form(
             "url": url,
             "maxTimeout": 60000,
             "postData": body,
+        }),
+    };
+
+    let mut resp = ureq::post(fs_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = resp.body_mut().read_to_string()?;
+    let body: FlareSolverrResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!("FlareSolverr error: {}", body.message));
+    }
+    Ok(body.solution.response)
+}
+
+fn proxy_post_empty(fs_url: &str, session_id: Option<&str>, url: &str) -> Result<String> {
+    let payload = match session_id {
+        Some(sid) => json!({
+            "cmd": "request.post",
+            "url": url,
+            "maxTimeout": 60000,
+            "session": sid,
+            "postData": "",
+        }),
+        None => json!({
+            "cmd": "request.post",
+            "url": url,
+            "maxTimeout": 60000,
+            "postData": "",
         }),
     };
 

@@ -20,7 +20,7 @@ lazy_static! {
 
 const ID: i64 = 17;
 const NAME: &str = "365Manga";
-const URL: &str = "https://harimanga.me";
+const URL: &str = "https://www.harimanga.co.uk";
 const REQUESTS_PER_SECOND: f64 = 10.0;
 
 pub struct ThreeSixtyFiveManga {

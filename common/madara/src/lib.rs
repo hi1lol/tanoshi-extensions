@@ -39,54 +39,81 @@ pub fn parse_manga_list(
     selector: &Selector,
     is_selector_url: bool,
 ) -> Result<Vec<MangaInfo>> {
-    let mut manga = vec![];
-
     let doc = Html::parse_document(body);
 
-    for el in doc.select(selector) {
-        let selector_name = Selector::parse(if is_selector_url {
-            "div.item-summary > a > h3, div.data > h3 > a, div.post-title > h3"
-        } else {
-            "div.item-summary > a > h3, div.data > h3 > a, div.post-title > h3 > a"
-        })
+    let selector_name = Selector::parse(if is_selector_url {
+        "div.item-summary > a > h3, div.data > h3 > a, div.post-title > h3"
+    } else {
+        "div.item-summary > a > h3, div.data > h3 > a, div.post-title > h3 > a"
+    })
+    .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
+
+    let selector_url = Selector::parse("div.data a, div.post-title a, div.item-thumb a")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-        let selector_url = Selector::parse("div.data a, div.post-title a, div.item-thumb a")
-            .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
+    let selector_img =
+        Selector::parse("img").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-        let selector_img =
-            Selector::parse("img").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
-        manga.push(MangaInfo {
-            source_id,
-            title: el
+    Ok(doc
+        .select(selector)
+        .filter_map(|el| {
+            let Some(title) = el
                 .select(&selector_name)
                 .next()
-                .and_then(|item| item.last_child())
-                .and_then(|t| t.value().as_text())
-                .unwrap()
-                .trim()
-                .to_string(),
-            author: vec![],
-            genre: vec![],
-            status: None,
-            description: None,
-            path: if is_selector_url {
-                el.value().attr("href").unwrap().replace(url, "")
-            } else {
-                el.select(&selector_url)
-                    .next()
-                    .unwrap()
-                    .value()
-                    .attr("href")
-                    .unwrap_or_default()
-                    .replace(url, "")
-            },
-            cover_url: get_data_src(&el.select(&selector_img).next().unwrap()).unwrap_or_default(),
-        })
-    }
+                .map(|item| item.text().collect::<String>())
+                .map(|title| title.trim().to_string())
+                .filter(|title| !title.is_empty())
+            else {
+                log::warn!("Skipping malformed Madara manga card from {url}: missing title");
+                return None;
+            };
 
-    Ok(manga)
+            let path = if is_selector_url {
+                let Some(href) = el.value().attr("href") else {
+                    log::warn!("Skipping malformed Madara manga card from {url}: missing URL href");
+                    return None;
+                };
+                href.replace(url, "")
+            } else {
+                let Some(url_element) = el.select(&selector_url).next() else {
+                    log::warn!(
+                        "Skipping malformed Madara manga card from {url}: missing URL element"
+                    );
+                    return None;
+                };
+                let Some(href) = url_element.value().attr("href") else {
+                    log::warn!("Skipping malformed Madara manga card from {url}: missing URL href");
+                    return None;
+                };
+                href.replace(url, "")
+            };
+            if path.is_empty() {
+                log::warn!("Skipping malformed Madara manga card from {url}: missing URL");
+                return None;
+            }
+
+            let Some(cover_url) = el
+                .select(&selector_img)
+                .next()
+                .and_then(|image| get_data_src(&image))
+                .filter(|cover_url| !cover_url.trim().is_empty())
+            else {
+                log::warn!("Skipping malformed Madara manga card from {url}: missing image");
+                return None;
+            };
+
+            Some(MangaInfo {
+                source_id,
+                title,
+                author: vec![],
+                genre: vec![],
+                status: None,
+                description: None,
+                path,
+                cover_url,
+            })
+        })
+        .collect())
 }
 
 pub fn get_latest_manga(
@@ -319,9 +346,12 @@ fn parse_chapters(
     selector_chapter_url: &Selector,
     source_id: i64,
 ) -> Result<Vec<ChapterInfo>> {
+    let selector_chapter_title = Selector::parse("a[title]")
+        .map_err(|e| anyhow!("failed to parse chapter title selector: {:?}", e))?;
+
     let chapters: Vec<ChapterInfo> = doc
         .select(selector)
-        .map(|el| {
+        .filter_map(|el| {
             let chapter_name = el
                 .select(selector_chapter_name)
                 .flat_map(|el| el.text())
@@ -340,7 +370,7 @@ fn parse_chapters(
                         text
                     } else {
                         // Look for a child <a> with a title attribute (e.g. c-new-tag)
-                        e.select(&Selector::parse("a[title]").unwrap())
+                        e.select(&selector_chapter_title)
                             .next()
                             .and_then(|a| a.value().attr("title"))
                             .unwrap_or("")
@@ -355,18 +385,20 @@ fn parse_chapters(
                 .and_utc()
                 .timestamp();
 
-            ChapterInfo {
+            let Some(chapter_url) = el
+                .select(selector_chapter_url)
+                .next()
+                .and_then(|link| link.value().attr("href"))
+                .filter(|href| !href.is_empty())
+            else {
+                log::warn!("Skipping malformed Madara chapter from {url}: missing chapter URL");
+                return None;
+            };
+
+            Some(ChapterInfo {
                 source_id,
                 title: chapter_name.clone(),
-                path: el
-                    .select(selector_chapter_url)
-                    .next()
-                    .unwrap()
-                    .value()
-                    .attr("href")
-                    .unwrap()
-                    .to_string()
-                    .replace(url, ""),
+                path: chapter_url.to_string().replace(url, ""),
                 number: chapter_name
                     .replace("Chapter ", "")
                     .split(' ')
@@ -375,7 +407,7 @@ fn parse_chapters(
                     .unwrap_or_default(),
                 scanlator: None,
                 uploaded,
-            }
+            })
         })
         .collect();
 

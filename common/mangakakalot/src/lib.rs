@@ -3,6 +3,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use fancy_regex::Regex;
 use networking::Agent;
 use scraper::{ElementRef, Html, Selector};
+use std::io::Read;
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
 
 const URL: &str = "https://chapmanganato.to";
@@ -33,6 +34,12 @@ fn get_cover(el: &ElementRef, selector: &str) -> Option<String> {
         .value()
         .attr("src")
         .map(|src| src.to_owned())
+}
+
+fn convert_description<R: Read>(reader: R) -> Option<String> {
+    html2text::from_read(reader, 1000)
+        .ok()
+        .map(|description| description.replace("### Description :\n\n", ""))
 }
 
 pub fn parse_manga_list(source_id: i64, body: &str, selector: &str) -> Result<Vec<MangaInfo>> {
@@ -121,11 +128,9 @@ pub fn get_manga_detail(path: &str, source_id: i64, client: &Agent) -> Result<Ma
             .map(|s| s.to_string())
             .collect(),
         status: None,
-        description: doc.select(&selector_desc).next().map(|el| {
+        description: doc.select(&selector_desc).next().and_then(|el| {
             let text = el.inner_html().trim().to_owned();
-            html2text::from_read(text.as_bytes(), 1000)
-                .expect("Failed to convert HTML to text")
-                .replace("### Description :\n\n", "")
+            convert_description(text.as_bytes())
         }),
         path: path.to_string(),
         cover_url: doc

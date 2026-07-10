@@ -13,46 +13,57 @@ fn get_data_src(el: &ElementRef) -> Option<String> {
 }
 
 pub fn parse_manga_list(url: &str, source_id: i64, body: &str) -> Result<Vec<MangaInfo>> {
-    let mut manga = vec![];
     let doc = Html::parse_document(body);
 
     let selector = Selector::parse(".utao .uta .imgu, .listupd .bs .bsx, .listo .bs .bsx")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
+    let selector_name =
+        Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
+    let selector_img =
+        Selector::parse("img").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-    for el in doc.select(&selector) {
-        let selector_name =
-            Selector::parse("a").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-        let selector_img =
-            Selector::parse("img").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
-        manga.push(MangaInfo {
-            source_id,
-            title: el
-                .select(&selector_name)
-                .next()
-                .unwrap()
+    Ok(doc
+        .select(&selector)
+        .filter_map(|el| {
+            let Some(link) = el.select(&selector_name).next() else {
+                log::warn!("Skipping malformed WP Manga Reader card from {url}: missing link");
+                return None;
+            };
+            let Some(title) = link
                 .value()
                 .attr("title")
-                .unwrap()
-                .trim()
-                .to_string(),
-            author: vec![],
-            genre: vec![],
-            status: None,
-            description: None,
-            path: el
-                .select(&selector_name)
+                .map(str::trim)
+                .filter(|title| !title.is_empty())
+            else {
+                log::warn!("Skipping malformed WP Manga Reader card from {url}: missing title");
+                return None;
+            };
+            let Some(path) = link.value().attr("href").filter(|href| !href.is_empty()) else {
+                log::warn!("Skipping malformed WP Manga Reader card from {url}: missing URL");
+                return None;
+            };
+            let Some(cover_url) = el
+                .select(&selector_img)
                 .next()
-                .unwrap()
-                .value()
-                .attr("href")
-                .unwrap()
-                .replace(url, ""),
-            cover_url: get_data_src(&el.select(&selector_img).next().unwrap()).unwrap_or_default(),
-        })
-    }
+                .and_then(|image| get_data_src(&image))
+                .filter(|cover_url| !cover_url.trim().is_empty())
+            else {
+                log::warn!("Skipping malformed WP Manga Reader card from {url}: missing image");
+                return None;
+            };
 
-    Ok(manga)
+            Some(MangaInfo {
+                source_id,
+                title: title.to_string(),
+                author: vec![],
+                genre: vec![],
+                status: None,
+                description: None,
+                path: path.replace(url, ""),
+                cover_url,
+            })
+        })
+        .collect())
 }
 
 pub fn get_latest_manga(

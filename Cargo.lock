@@ -688,22 +688,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "manhuafast"
-version = "0.5.4"
-dependencies = [
- "anyhow",
- "bytes",
- "env_logger",
- "lazy_static",
- "log",
- "madara",
- "networking",
- "tanoshi-lib",
-]
-
-[[package]]
 name = "manhwa18cc"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1391,18 +1377,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "three_sixty_five_manga"
-version = "0.5.4"
-dependencies = [
- "anyhow",
- "bytes",
- "lazy_static",
- "madara",
- "networking",
- "tanoshi-lib",
-]
-
-[[package]]
 name = "time"
 version = "0.3.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1604,7 +1578,7 @@ dependencies = [
 
 [[package]]
 name = "weebcentral"
-version = "0.5.2"
+version = "0.5.3"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1754,6 +1728,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "log",
  "networking",
  "scraper",
  "tanoshi-lib",

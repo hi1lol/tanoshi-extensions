@@ -427,16 +427,9 @@ impl FlareClient {
         // Use a FlareSolverr session only when the user explicitly supplies one.
         let session_id = std::env::var("FLARESOLVERR_SESSION").ok();
 
-        // Try initial solve; on failure fall back to plain agent.
-        let (agent, default_headers) =
-            match solve_with_flaresolverr(&flaresolverr_url, origin_url, session_id.as_deref()) {
-                Ok(solved) => {
-                    let a = build_ureq_agent(Some(&solved.user_agent));
-                    insert_flaresolverr_cookies_into_agent(&a, solved.cookies);
-                    (a, solved.headers)
-                }
-                Err(_) => (build_ureq_agent(None), vec![]),
-            };
+        // Solve lazily on the first challenge instead of blocking construction.
+        let agent = build_ureq_agent(None);
+        let default_headers = vec![];
 
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -495,7 +488,7 @@ impl FlareClient {
     /// Strategy: direct-first, proxy-on-challenge with learning.
     ///   1. If direct requests have worked before (or never been tried), try a
     ///      direct GET using the current agent.
-    ///   2. If challenged, re-solve via FlareSolverr and retry direct once.
+    ///   2. If challenged, lazily re-solve via FlareSolverr and retry direct once.
     ///   3. If direct is still challenged, mark `direct_works = false` so
     ///      future requests skip straight to the proxy, then proxy this request.
     ///   4. After a cooldown, try the direct path again.
@@ -1700,8 +1693,8 @@ mod test {
 
     /// Integration: FlareClient direct-first strategy against a CF-protected site.
     /// Validates that:
-    ///   1. from_env solves initially and stores cookies/UA/headers
-    ///   2. fetch_text succeeds via the direct path (no per-request proxy)
+    ///   1. construction does not perform a solve
+    ///   2. fetch_text succeeds via the direct path or lazy solve
     ///   3. The returned HTML is the real page, not a challenge
     #[test]
     #[ignore]
@@ -1711,14 +1704,13 @@ mod test {
 
         let client = FlareClient::from_env("https://nowsecure.com").unwrap();
 
-        // Verify internal state was populated by the initial solve
+        // Verify construction only stored the configured request state.
         {
             let guard = client.inner.lock().unwrap();
             assert!(guard.flaresolverr_url.is_some());
             assert_eq!(guard.origin_url, "https://nowsecure.com");
-            // After a successful solve, we should have default_headers
-            // (may be empty if the site returns few headers, but agent
-            // should have cookies).
+            // No solve should have happened during construction.
+            assert!(guard.default_headers.is_empty());
         }
 
         let body = client.fetch_text("https://nowsecure.com").unwrap();

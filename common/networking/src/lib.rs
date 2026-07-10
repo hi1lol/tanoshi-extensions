@@ -32,7 +32,7 @@ pub struct RateLimitedAgent {
 
 impl RateLimitedAgent {
     pub fn new(inner: ureq::Agent, requests_per_second: Option<f64>) -> Self {
-        info!(
+        debug!(
             "Net RateLimitedAgent setup with {:?} RPS",
             requests_per_second
         );
@@ -352,7 +352,7 @@ impl FlareClient {
     #[inline]
     fn throttle(&self) {
         let limiter = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             guard.limiter.clone()
         };
         if let Some(l) = limiter {
@@ -360,11 +360,17 @@ impl FlareClient {
         }
     }
 
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Re-solve via FlareSolverr and update the internal agent + headers.
     /// Returns Ok(true) if re-solve succeeded, Ok(false) if no FS configured.
     fn re_solve(&self) -> Result<bool> {
         let (fs_url, origin_url, session_id) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             match &guard.flaresolverr_url {
                 Some(url) => (
                     url.clone(),
@@ -385,7 +391,7 @@ impl FlareClient {
         insert_flaresolverr_cookies_into_agent(&new_agent, solved.cookies);
 
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.agent = new_agent;
             guard.default_headers = solved.headers;
         }
@@ -469,7 +475,7 @@ impl FlareClient {
     }
 
     fn direct_path_state(&self) -> (bool, bool) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.lock_inner();
         let should_try_direct = if guard.direct_works {
             true
         } else if guard
@@ -487,7 +493,7 @@ impl FlareClient {
     }
 
     fn disable_direct_path(&self) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.lock_inner();
         guard.direct_works = false;
         guard.direct_disabled_until = Some(Instant::now() + DIRECT_RETRY_COOLDOWN);
     }
@@ -521,11 +527,11 @@ impl FlareClient {
         D: Fn(&Self, &str) -> Result<DirectResult>,
         P: Fn(&str, Option<&str>, &str) -> Result<String>,
     {
+        self.throttle();
         let (should_try_direct, has_fs) = self.direct_path_state();
 
         if should_try_direct {
             debug!("FlareClient: direct {} {}", method, url);
-            self.throttle();
             match direct_request(self, url) {
                 Ok(DirectResult::Success(text)) => {
                     debug!("FlareClient: direct {} succeeded for {}", method, url);
@@ -557,7 +563,6 @@ impl FlareClient {
                         "FlareClient: retrying direct {} after re-solve for {}",
                         method, url
                     );
-                    self.throttle();
                     match direct_request(self, url) {
                         Ok(DirectResult::Success(text)) => {
                             info!(
@@ -607,13 +612,12 @@ impl FlareClient {
         }
 
         let (fs_url_opt, session_id_opt) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (guard.flaresolverr_url.clone(), guard.session_id.clone())
         };
 
         if let Some(fs_url) = fs_url_opt {
             debug!("FlareClient: proxy {} {}", method, url);
-            self.throttle();
             match proxy_request(&fs_url, session_id_opt.as_deref(), url) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
@@ -632,7 +636,7 @@ impl FlareClient {
     /// Try a direct GET and classify the result.
     fn try_direct_get(&self, url: &str) -> Result<DirectResult> {
         let (default_headers, agent) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (guard.default_headers.clone(), guard.agent.clone())
         };
 
@@ -659,7 +663,7 @@ impl FlareClient {
         }
 
         let (default_headers, agent, origin_url) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (
                 guard.default_headers.clone(),
                 guard.agent.clone(),
@@ -689,7 +693,7 @@ impl FlareClient {
                         url
                     );
                     let (default_headers, agent, origin_url) = {
-                        let guard = self.inner.lock().unwrap();
+                        let guard = self.lock_inner();
                         (
                             guard.default_headers.clone(),
                             guard.agent.clone(),
@@ -765,7 +769,7 @@ impl FlareClient {
     /// Try a direct POST with form data and classify the result.
     fn try_direct_post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<DirectResult> {
         let (default_headers, agent) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (guard.default_headers.clone(), guard.agent.clone())
         };
 
@@ -782,7 +786,7 @@ impl FlareClient {
         extra_headers: &[(&str, &str)],
     ) -> Result<DirectResult> {
         let (default_headers, agent) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (guard.default_headers.clone(), guard.agent.clone())
         };
 
@@ -1059,6 +1063,7 @@ mod test {
     use super::*;
     use serde_json::json;
     use std::env;
+    use std::sync::{Mutex as StdMutex, OnceLock};
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -1066,6 +1071,14 @@ mod test {
 
     fn flaresolverr_url() -> String {
         env::var("FLARESOLVERR_URL").unwrap_or_else(|_| "http://localhost:8191/v1".to_string())
+    }
+
+    fn env_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_TEST_GUARD: OnceLock<StdMutex<()>> = OnceLock::new();
+        ENV_TEST_GUARD
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn get_flaresolverr_response(url: &str, flaresolverr_url: &str) -> FlareSolverrResponse {
@@ -1503,6 +1516,7 @@ mod test {
 
     #[test]
     fn test_from_env_no_env_var_is_plain() {
+        let _guard = env_test_guard();
         // Ensure env var is not set for this test
         // SAFETY: Test-only; single-threaded test runner for env-dependent tests.
         unsafe { env::remove_var("FLARESOLVERR_URL") };
@@ -1514,6 +1528,7 @@ mod test {
 
     #[test]
     fn test_from_env_or_plain_no_env_var() {
+        let _guard = env_test_guard();
         unsafe { env::remove_var("FLARESOLVERR_URL") };
         let client = FlareClient::from_env_or_plain("https://example.com");
         let guard = client.inner.lock().unwrap();
@@ -1645,6 +1660,7 @@ mod test {
 
     #[test]
     fn test_build_rate_limited_flaresolverr_client_no_env() {
+        let _guard = env_test_guard();
         unsafe { env::remove_var("FLARESOLVERR_URL") };
         // Should fall back to plain client without panicking
         let client = build_rate_limited_flaresolverr_client("https://example.com", Some(3.0));
@@ -1697,6 +1713,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_nowsecure() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
 
         let flare_body = get_flaresolverr_response("https://nowsecure.com", &fs_url);
@@ -1712,6 +1729,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_openai() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
 
         let flare_body = get_flaresolverr_response("https://openai.com", &fs_url);
@@ -1730,6 +1748,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_flare_client_direct_first_fetch() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         unsafe { env::set_var("FLARESOLVERR_URL", &fs_url) };
 
@@ -1782,6 +1801,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_solve_with_flaresolverr_struct() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         let solved = solve_with_flaresolverr(&fs_url, "https://nowsecure.com", None).unwrap();
 
@@ -1836,6 +1856,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_flare_client_session_not_created_by_default() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         unsafe { env::set_var("FLARESOLVERR_URL", &fs_url) };
         unsafe { env::remove_var("FLARESOLVERR_SESSION") };
@@ -1850,6 +1871,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_flare_client_multiple_fetches_reuse_agent() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         unsafe { env::set_var("FLARESOLVERR_URL", &fs_url) };
 

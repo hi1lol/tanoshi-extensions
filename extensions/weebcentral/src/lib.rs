@@ -3,7 +3,7 @@ use bytes::Bytes;
 use chrono::prelude::*;
 use lazy_static::lazy_static;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use std::env;
 use tanoshi_lib::extensions::PluginRegistrar;
 use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, Lang, MangaInfo, SourceInfo};
@@ -31,6 +31,21 @@ fn parse_upload_timestamp(upload: &str) -> i64 {
         .parse::<DateTime<Utc>>()
         .map(|date| date.timestamp())
         .unwrap_or(0)
+}
+
+fn find_sidebar_section<'a>(
+    document: &'a Html,
+    sidebar_selector: &Selector,
+    label_selector: &Selector,
+    label: &str,
+) -> Option<ElementRef<'a>> {
+    document.select(sidebar_selector).find(|section| {
+        section
+            .select(label_selector)
+            .next()
+            .map(|label_element| label_element.text().collect::<String>())
+            .is_some_and(|section_label| section_label.trim().trim_end_matches(':') == label)
+    })
 }
 
 pub struct Weebcentral {
@@ -194,6 +209,7 @@ impl Extension for Weebcentral {
 
         let title_selector = Selector::parse("h1.hidden.md\\:block.text-2xl.font-bold").unwrap();
         let sidebar_selector: Selector = Selector::parse("ul.flex.flex-col.gap-4 > li").unwrap();
+        let label_selector = Selector::parse("strong").unwrap();
         let link_selector = Selector::parse("span > a.link.link-info.link-hover").unwrap();
         let status_selector = Selector::parse("strong + a.link.link-info.link-hover").unwrap();
         let description_selector = Selector::parse(
@@ -207,23 +223,27 @@ impl Extension for Weebcentral {
             |el| el.inner_html().trim().to_string(),
         );
 
-        let author_sec = manga.select(&sidebar_selector).nth(0).unwrap();
-        let genre_sec = manga.select(&sidebar_selector).nth(1).unwrap();
-        let status_sec = manga.select(&sidebar_selector).nth(3).unwrap();
+        let author_sec =
+            find_sidebar_section(&manga, &sidebar_selector, &label_selector, "Author(s)");
+        let genre_sec = find_sidebar_section(&manga, &sidebar_selector, &label_selector, "Tags(s)");
+        let status_sec = find_sidebar_section(&manga, &sidebar_selector, &label_selector, "Status");
 
         let mut authors: Vec<String> = Vec::new();
-        for author in author_sec.select(&link_selector) {
-            authors.push(author.inner_html().trim().to_string());
+        if let Some(author_sec) = author_sec {
+            for author in author_sec.select(&link_selector) {
+                authors.push(author.inner_html().trim().to_string());
+            }
         }
 
         let mut genres: Vec<String> = Vec::new();
-        for genre in genre_sec.select(&link_selector) {
-            genres.push(genre.inner_html().trim().to_string());
+        if let Some(genre_sec) = genre_sec {
+            for genre in genre_sec.select(&link_selector) {
+                genres.push(genre.inner_html().trim().to_string());
+            }
         }
 
         let status = status_sec
-            .select(&status_selector)
-            .next()
+            .and_then(|section| section.select(&status_selector).next())
             .map_or_else(|| "".to_string(), |el| el.inner_html().trim().to_string());
 
         let description = manga

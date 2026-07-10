@@ -69,13 +69,23 @@ pub fn parse_manga_list(
             };
 
             let path = if is_selector_url {
-                el.value().attr("href")?.replace(url, "")
+                let Some(href) = el.value().attr("href") else {
+                    log::warn!("Skipping malformed Madara manga card from {url}: missing URL href");
+                    return None;
+                };
+                href.replace(url, "")
             } else {
-                el.select(&selector_url)
-                    .next()?
-                    .value()
-                    .attr("href")?
-                    .replace(url, "")
+                let Some(url_element) = el.select(&selector_url).next() else {
+                    log::warn!(
+                        "Skipping malformed Madara manga card from {url}: missing URL element"
+                    );
+                    return None;
+                };
+                let Some(href) = url_element.value().attr("href") else {
+                    log::warn!("Skipping malformed Madara manga card from {url}: missing URL href");
+                    return None;
+                };
+                href.replace(url, "")
             };
             if path.is_empty() {
                 log::warn!("Skipping malformed Madara manga card from {url}: missing URL");
@@ -336,6 +346,9 @@ fn parse_chapters(
     selector_chapter_url: &Selector,
     source_id: i64,
 ) -> Result<Vec<ChapterInfo>> {
+    let selector_chapter_title = Selector::parse("a[title]")
+        .map_err(|e| anyhow!("failed to parse chapter title selector: {:?}", e))?;
+
     let chapters: Vec<ChapterInfo> = doc
         .select(selector)
         .filter_map(|el| {
@@ -357,7 +370,7 @@ fn parse_chapters(
                         text
                     } else {
                         // Look for a child <a> with a title attribute (e.g. c-new-tag)
-                        e.select(&Selector::parse("a[title]").unwrap())
+                        e.select(&selector_chapter_title)
                             .next()
                             .and_then(|a| a.value().attr("title"))
                             .unwrap_or("")

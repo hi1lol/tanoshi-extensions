@@ -5,6 +5,7 @@ use bytes::Bytes;
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
 use log::{debug, info, warn};
 use ratelimit::RateLimiter;
+use scraper::{Html, Selector};
 use serde_json::{Value as JsonValue, json};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
@@ -1047,12 +1048,10 @@ where
 
 // Tiny helper: pull the first <img ... src="..."> out of wrapper HTML.
 fn extract_first_img_src(html: &str) -> Option<String> {
-    // Look for: src="...".
-    let needle = "src=\"";
-    let start = html.find(needle)? + needle.len();
-    let rest = &html[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    let selector = Selector::parse("img[src]").ok()?;
+    Html::parse_document(html)
+        .select(&selector)
+        .find_map(|image| image.value().attr("src").map(str::to_string))
 }
 
 #[cfg(test)]
@@ -1222,7 +1221,11 @@ mod test {
 
     #[test]
     fn test_extract_img_src_picks_first() {
-        let html = r#"<img src="first.png"><img src="second.png">"#;
+        let html = r#"
+            <script src="not-an-image.js"></script>
+            <iframe src="not-an-image.html"></iframe>
+            <img src="first.png"><img src="second.png">
+        "#;
         assert_eq!(extract_first_img_src(html), Some("first.png".to_string()));
     }
 

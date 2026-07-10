@@ -765,6 +765,7 @@ dependencies = [
  "env_logger",
  "log",
  "once_cell",
+ "scraper",
  "serde",
  "serde_json",
  "ureq",

@@ -26,6 +26,13 @@ const REQUESTS_PER_SECOND: f64 = 10.0;
 // Get Pages seems to have its own rate limit
 const PAGES_REQUESTS_PER_SECOND: f64 = 1.0;
 
+fn parse_upload_timestamp(upload: &str) -> i64 {
+    upload
+        .parse::<DateTime<Utc>>()
+        .map(|date| date.timestamp())
+        .unwrap_or(0)
+}
+
 pub struct Weebcentral {
     preferences: Vec<Input>,
     client: RateLimitedAgent,
@@ -285,7 +292,7 @@ impl Extension for Weebcentral {
                 ),
                 number: number as f64,
                 scanlator: None,
-                uploaded: upload.parse::<DateTime<Utc>>().unwrap().timestamp(),
+                uploaded: parse_upload_timestamp(&upload),
             });
             number -= 1;
         }

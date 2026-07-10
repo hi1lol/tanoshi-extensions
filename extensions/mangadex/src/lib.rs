@@ -31,6 +31,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ID: i64 = 2;
 const NAME: &str = "Mangadex";
 const URL: &str = "https://api.mangadex.org";
+const SITE_URL: &str = "https://mangadex.org";
 // While api.mangadex.org has a rate limit of 5 requests per second
 // The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
 const REQUESTS_PER_SECOND: f64 = 5.0;
@@ -360,7 +361,7 @@ impl Extension for Mangadex {
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        self.client.fetch_bytes(&url, Some(URL))
+        self.client.fetch_bytes(&url, Some(SITE_URL))
     }
 }
 

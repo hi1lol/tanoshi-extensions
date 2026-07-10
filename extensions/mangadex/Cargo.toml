@@ -19,5 +19,4 @@ lazy_static = "1"
 serde_qs = "0.15"
 phf = { version = "0.13", features = ["macros"] }
 log = "0.4"
-env_logger = { version = "0.11", default-features = false }
 bytes = "1"

@@ -10,6 +10,12 @@ use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar, SourceInfo};
 tanoshi_lib::export_plugin!(register);
 
 fn register(registrar: &mut dyn PluginRegistrar) {
+    networking::init_plugin_logging();
+    log::info!(
+        "Registering {} extension v{}",
+        NAME,
+        env!("CARGO_PKG_VERSION")
+    );
     registrar.register_function(Box::new(Manhwa18cc::default()));
 }
 
@@ -66,6 +72,7 @@ impl Extension for Manhwa18cc {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: get_popular_manga page={page}");
         let mut res = self
             .client
             .get(&format!("{}/webtoons/{}?orderby=latest", URL, page))
@@ -79,6 +86,7 @@ impl Extension for Manhwa18cc {
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: get_latest_manga page={page}");
         let mut res = self
             .client
             .get(&format!("{}/webtoons/{}?orderby=latest", URL, page))
@@ -97,6 +105,7 @@ impl Extension for Manhwa18cc {
         query: Option<String>,
         _: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: search_manga page={page} query={query:?}");
         if let Some(query) = query {
             search_manga_old(URL, ID, page, &query, &self.client)
         } else {
@@ -105,14 +114,17 @@ impl Extension for Manhwa18cc {
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
+        log::debug!("{NAME}: get_manga_detail path={path}");
         get_manga_detail(URL, &path, ID, &self.client)
     }
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
+        log::debug!("{NAME}: get_chapters path={path}");
         get_chapters_old(URL, &path, ID, &self.client)
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+        log::debug!("{NAME}: get_pages path={path}");
         let mut res = self.client.get(&format!("{}{}", URL, path)).call()?;
         let body = res.body_mut().read_to_string()?;
 
@@ -133,6 +145,7 @@ impl Extension for Manhwa18cc {
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        log::debug!("{NAME}: get_image_bytes url={url}");
         self.client.fetch_bytes(&url, Some(URL))
     }
 }

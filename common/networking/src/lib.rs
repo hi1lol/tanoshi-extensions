@@ -8,7 +8,7 @@ use ratelimit::RateLimiter;
 use scraper::{Html, Selector};
 use serde_json::{Value as JsonValue, json};
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 use ureq::typestate::{WithBody, WithoutBody};
 use ureq::{
@@ -30,6 +30,19 @@ const DIRECT_RETRY_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 const DEFAULT_BROWSER_UA: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0";
 
+/// Install a logger for code running inside an extension, once, the first
+/// time a client is built. Extensions are cdylibs: the host application's
+/// logger never reaches the plugin's own `log` facade, so without this every
+/// log line in extension code is silently dropped. Controlled by RUST_LOG
+/// (e.g. RUST_LOG=networking=debug), defaults to info, writes to stderr.
+pub fn init_plugin_logging() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .try_init();
+    });
+}
+
 #[derive(Clone)]
 pub struct RateLimitedAgent {
     inner: ureq::Agent,
@@ -38,6 +51,7 @@ pub struct RateLimitedAgent {
 
 impl RateLimitedAgent {
     pub fn new(inner: ureq::Agent, requests_per_second: Option<f64>) -> Self {
+        init_plugin_logging();
         debug!(
             "Net RateLimitedAgent setup with {:?} RPS",
             requests_per_second
@@ -51,6 +65,7 @@ impl RateLimitedAgent {
         RateLimitedRequest {
             inner: self.inner.get(url),
             limiter: self.limiter.clone(),
+            url: url.to_string(),
         }
     }
 
@@ -58,6 +73,7 @@ impl RateLimitedAgent {
         RateLimitedRequest {
             inner: self.inner.post(url),
             limiter: self.limiter.clone(),
+            url: url.to_string(),
         }
     }
 
@@ -73,6 +89,7 @@ impl RateLimitedAgent {
 pub struct RateLimitedRequest<B> {
     inner: ureq::RequestBuilder<B>,
     limiter: Option<Arc<RateLimiter>>,
+    url: String,
 }
 
 impl<B> RateLimitedRequest<B> {
@@ -93,6 +110,7 @@ impl<B> RateLimitedRequest<B> {
         Self {
             inner: self.inner.header(key, value),
             limiter: self.limiter,
+            url: self.url,
         }
     }
 
@@ -104,6 +122,7 @@ impl<B> RateLimitedRequest<B> {
         Self {
             inner: self.inner.query(key, value),
             limiter: self.limiter,
+            url: self.url,
         }
     }
 }
@@ -115,6 +134,7 @@ impl RateLimitedRequest<WithoutBody> {
         Self {
             inner,
             limiter: self.limiter,
+            url: self.url,
         }
     }
 
@@ -123,11 +143,13 @@ impl RateLimitedRequest<WithoutBody> {
         Self {
             inner,
             limiter: self.limiter,
+            url: self.url,
         }
     }
 
     pub fn call(self) -> Result<HttpResponse, ureq::Error> {
         self.throttle();
+        debug!("GET {}", self.url);
         self.inner.call()
     }
 }
@@ -136,6 +158,7 @@ impl RateLimitedRequest<WithoutBody> {
 impl RateLimitedRequest<WithBody> {
     pub fn send_empty(self) -> Result<HttpResponse, ureq::Error> {
         self.throttle();
+        debug!("POST (empty) {}", self.url);
         self.inner.send_empty()
     }
 
@@ -146,11 +169,13 @@ impl RateLimitedRequest<WithBody> {
         V: AsRef<str>,
     {
         self.throttle();
+        debug!("POST (form) {}", self.url);
         self.inner.send_form(form)
     }
 
     pub fn send_json<T: serde::Serialize>(self, value: &T) -> Result<HttpResponse, ureq::Error> {
         self.throttle();
+        debug!("POST (json) {}", self.url);
         self.inner.send_json(value)
     }
 }
@@ -342,7 +367,8 @@ pub struct FlareClient {
 }
 
 /// Heuristic: does this response body look like a Cloudflare challenge page?
-fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
+/// Returns the marker that matched so routing decisions can be traced in logs.
+fn cf_challenge_marker(status: u16, body: &str) -> Option<&'static str> {
     let lower = body.to_ascii_lowercase();
 
     // Cloudflare challenge pages contain characteristic markers.
@@ -356,7 +382,16 @@ fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
         && lower.contains("cloudflare");
 
     if has_cf_markers {
-        return true;
+        if lower.contains("cf-browser-verification") {
+            return Some("cf-browser-verification");
+        }
+        if lower.contains("cf_chl_opt") {
+            return Some("cf_chl_opt");
+        }
+        if lower.contains("challenge-platform") {
+            return Some("challenge-platform");
+        }
+        return Some("just a moment");
     }
 
     // Cloudflare sometimes returns very short 403/503 bodies that lack the usual
@@ -364,10 +399,15 @@ fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
     // page, or a turnstile script. Check for these narrower patterns only on
     // status codes that Cloudflare commonly uses for challenges.
     if (status == 403 || status == 503) && lower.contains("cloudflare") {
-        return true;
+        return Some("403/503 status mentioning cloudflare");
     }
 
-    false
+    None
+}
+
+#[cfg(test)]
+fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
+    cf_challenge_marker(status, body).is_some()
 }
 
 impl FlareClient {
@@ -423,6 +463,7 @@ impl FlareClient {
     }
 
     pub fn plain_with_rps(requests_per_second: Option<f64>) -> Self {
+        init_plugin_logging();
         let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         FlareClient {
@@ -440,10 +481,14 @@ impl FlareClient {
     }
 
     pub fn from_env_with_rps(origin_url: &str, requests_per_second: Option<f64>) -> Result<Self> {
+        init_plugin_logging();
         let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         let flaresolverr_url = std::env::var("FLARESOLVERR_URL").ok();
-        debug!("FLARESOLVERR_URL={:?}", flaresolverr_url);
+        info!(
+            "FlareClient for {}: FLARESOLVERR_URL={:?}",
+            origin_url, flaresolverr_url
+        );
 
         if flaresolverr_url.is_none() {
             return Ok(Self {
@@ -504,10 +549,21 @@ impl FlareClient {
             .direct_disabled_until
             .is_some_and(|until| Instant::now() >= until)
         {
+            info!(
+                "FlareClient: direct path cooldown expired for {}, retrying direct",
+                guard.origin_url
+            );
             guard.direct_works = true;
             guard.direct_disabled_until = None;
             true
         } else {
+            let remaining = guard
+                .direct_disabled_until
+                .map(|until| until.saturating_duration_since(Instant::now()));
+            info!(
+                "FlareClient: direct path disabled for {} ({:?} cooldown remaining), going straight to proxy",
+                guard.origin_url, remaining
+            );
             false
         };
 
@@ -667,7 +723,7 @@ impl FlareClient {
         };
 
         if let Some(fs_url) = fs_url_opt {
-            debug!("FlareClient: proxy {} {}", method, url);
+            info!("FlareClient: proxying {} {} via FlareSolverr", method, url);
             match proxy_request(&fs_url, session_id_opt.as_deref(), url) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
@@ -819,11 +875,27 @@ fn classify_direct_response(mut resp: HttpResponse) -> Result<DirectResult> {
     let status = resp.status().as_u16();
     let body = resp.body_mut().read_to_string()?;
 
-    if looks_like_cf_challenge(status, &body) {
+    if let Some(marker) = cf_challenge_marker(status, &body) {
+        info!(
+            "FlareClient: HTTP {} ({} bytes) classified as challenge, marker: {}",
+            status,
+            body.len(),
+            marker
+        );
         Ok(DirectResult::Challenged(status))
     } else if status >= 400 {
+        debug!(
+            "FlareClient: HTTP {} ({} bytes) classified as http error",
+            status,
+            body.len()
+        );
         Ok(DirectResult::HttpError(status))
     } else {
+        debug!(
+            "FlareClient: HTTP {} ({} bytes) classified as success",
+            status,
+            body.len()
+        );
         Ok(DirectResult::Success(body))
     }
 }

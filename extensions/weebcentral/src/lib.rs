@@ -12,6 +12,12 @@ use urlencoding::encode;
 tanoshi_lib::export_plugin!(register);
 
 fn register(registrar: &mut dyn PluginRegistrar) {
+    networking::init_plugin_logging();
+    log::info!(
+        "Registering {} extension v{}",
+        NAME,
+        env!("CARGO_PKG_VERSION")
+    );
     registrar.register_function(Box::new(Weebcentral::default()));
 }
 
@@ -169,6 +175,7 @@ impl Extension for Weebcentral {
     }
 
     fn get_popular_manga(&self, page: i64) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: get_popular_manga page={page}");
         get_manga_list(
             page,
             "/search/data?limit=32&author=&text=&sort=Popularity&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full%20Display&offset=",
@@ -177,6 +184,7 @@ impl Extension for Weebcentral {
     }
 
     fn get_latest_manga(&self, page: i64) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: get_latest_manga page={page}");
         get_manga_list(
             page,
             "/search/data?limit=32&sort=Latest+Updates&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full+Display&offset=",
@@ -190,6 +198,7 @@ impl Extension for Weebcentral {
         query: Option<String>,
         _: Option<Vec<Input>>,
     ) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: search_manga page={page} query={query:?}");
         //TODO: Add filters
         get_manga_list(
             page,
@@ -202,6 +211,7 @@ impl Extension for Weebcentral {
     }
 
     fn get_manga_detail(&self, path: String) -> Result<tanoshi_lib::prelude::MangaInfo> {
+        log::debug!("{NAME}: get_manga_detail path={path}");
         let mut resp = self.client.get(&format!("{URL}{path}")).call()?;
         let body = resp.body_mut().read_to_string()?;
 
@@ -269,6 +279,7 @@ impl Extension for Weebcentral {
     }
 
     fn get_chapters(&self, path: String) -> Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
+        log::debug!("{NAME}: get_chapters path={path}");
         let mut resp = self
             .client
             .get(&format!("{URL}{path}/full-chapter-list"))
@@ -321,6 +332,7 @@ impl Extension for Weebcentral {
     }
 
     fn get_pages(&self, path: String) -> Result<Vec<String>> {
+        log::debug!("{NAME}: get_pages path={path}");
         let mut resp = self
             .client_pages
             .get(&format!(
@@ -344,6 +356,7 @@ impl Extension for Weebcentral {
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        log::debug!("{NAME}: get_image_bytes url={url}");
         self.client.fetch_bytes(&url, Some(URL))
     }
 }

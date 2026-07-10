@@ -424,27 +424,8 @@ impl FlareClient {
         }
 
         let flaresolverr_url = flaresolverr_url.unwrap();
-        // Optional session
-        let mut session_id = std::env::var("FLARESOLVERR_SESSION").ok();
-        if session_id.is_none() {
-            if let Ok(mut resp) = ureq::post(&flaresolverr_url)
-                .header("Content-Type", "application/json")
-                .send_json(&json!({"cmd":"sessions.create"}))
-            {
-                if let Ok(text) = resp.body_mut().read_to_string() {
-                    #[derive(serde::Deserialize)]
-                    struct Created {
-                        status: String,
-                        session: Option<String>,
-                    }
-                    if let Ok(Created { status, session }) = serde_json::from_str(&text) {
-                        if status == "ok" {
-                            session_id = session;
-                        }
-                    }
-                }
-            }
-        }
+        // Use a FlareSolverr session only when the user explicitly supplies one.
+        let session_id = std::env::var("FLARESOLVERR_SESSION").ok();
 
         // Try initial solve; on failure fall back to plain agent.
         let (agent, default_headers) =
@@ -1826,10 +1807,10 @@ mod test {
         assert!(body.contains("X-Custom"));
     }
 
-    /// Integration: FlareClient with session support
+    /// Integration: FlareClient does not create a session by default
     #[test]
     #[ignore]
-    fn test_flare_client_session_creation() {
+    fn test_flare_client_session_not_created_by_default() {
         let fs_url = flaresolverr_url();
         unsafe { env::set_var("FLARESOLVERR_URL", &fs_url) };
         unsafe { env::remove_var("FLARESOLVERR_SESSION") };
@@ -1837,11 +1818,7 @@ mod test {
         let client = FlareClient::from_env("https://nowsecure.com").unwrap();
         let guard = client.inner.lock().unwrap();
 
-        // Session should have been auto-created
-        assert!(
-            guard.session_id.is_some(),
-            "Expected a session_id to be created automatically"
-        );
+        assert!(guard.session_id.is_none());
     }
 
     /// Integration: multiple sequential fetches reuse the same agent (direct path)

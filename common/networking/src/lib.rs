@@ -24,6 +24,12 @@ pub type HttpResponse = ureq::http::Response<ureq::Body>;
 const LIMIT_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 const DIRECT_RETRY_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
+/// User agent for FlareClient agents before the first FlareSolverr solve
+/// replaces them with the solved browser's UA. Sites that block default
+/// library user agents outright would otherwise 403 every first contact.
+const DEFAULT_BROWSER_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0";
+
 #[derive(Clone)]
 pub struct RateLimitedAgent {
     inner: ureq::Agent,
@@ -185,6 +191,22 @@ pub struct FlareSolverrCookie {
 }
 
 pub fn build_ureq_agent(user_agent: Option<&str>) -> Agent {
+    let mut cfg = Agent::config_builder().max_redirects(5);
+    if let Some(ua) = user_agent {
+        if !ua.is_empty() {
+            cfg = cfg.user_agent(ua);
+        }
+    }
+    cfg.build().into()
+}
+
+/// Agent for FlareClient's internal requests. Non-2xx statuses are returned
+/// as responses instead of errors so challenge classification can read the
+/// body of 403/503 pages; callers must check the status themselves. Plain
+/// `RateLimitedAgent` users keep ureq's status-as-error default via
+/// `build_ureq_agent` so HTTP failures surface as errors, not parseable
+/// bodies.
+fn build_lenient_ureq_agent(user_agent: Option<&str>) -> Agent {
     let mut cfg = Agent::config_builder()
         .max_redirects(5)
         .http_status_as_error(false);
@@ -387,7 +409,7 @@ impl FlareClient {
         );
 
         let solved = solve_with_flaresolverr(&fs_url, &origin_url, session_id.as_deref())?;
-        let new_agent = build_ureq_agent(Some(&solved.user_agent));
+        let new_agent = build_lenient_ureq_agent(Some(&solved.user_agent));
         insert_flaresolverr_cookies_into_agent(&new_agent, solved.cookies);
 
         {
@@ -405,7 +427,7 @@ impl FlareClient {
 
         FlareClient {
             inner: Arc::new(Mutex::new(Inner {
-                agent: build_ureq_agent(None),
+                agent: build_lenient_ureq_agent(Some(DEFAULT_BROWSER_UA)),
                 origin_url: String::new(),
                 flaresolverr_url: None,
                 session_id: None,
@@ -426,7 +448,7 @@ impl FlareClient {
         if flaresolverr_url.is_none() {
             return Ok(Self {
                 inner: Arc::new(Mutex::new(Inner {
-                    agent: build_ureq_agent(None),
+                    agent: build_lenient_ureq_agent(Some(DEFAULT_BROWSER_UA)),
                     origin_url: origin_url.to_string(),
                     flaresolverr_url: None,
                     session_id: None,
@@ -443,7 +465,7 @@ impl FlareClient {
         let session_id = std::env::var("FLARESOLVERR_SESSION").ok();
 
         // Solve lazily on the first challenge instead of blocking construction.
-        let agent = build_ureq_agent(None);
+        let agent = build_lenient_ureq_agent(Some(DEFAULT_BROWSER_UA));
         let default_headers = vec![];
 
         Ok(Self {
@@ -529,6 +551,7 @@ impl FlareClient {
     {
         self.throttle();
         let (should_try_direct, has_fs) = self.direct_path_state();
+        let mut last_error: Option<anyhow::Error> = None;
 
         if should_try_direct {
             debug!("FlareClient: direct {} {}", method, url);
@@ -542,18 +565,37 @@ impl FlareClient {
                         "FlareClient: direct {} got challenged (HTTP {}) for {}",
                         method, status, url
                     );
+                    last_error = Some(anyhow!("challenged (HTTP {})", status));
                 }
                 Ok(DirectResult::HttpError(status)) => {
-                    return Err(anyhow!(
-                        "FlareClient: direct {} returned HTTP {} for {}",
-                        method,
-                        status,
-                        url
-                    ));
+                    // Statuses that WAF/CDN layers use to block clients may
+                    // still succeed through re-solve/proxy; anything else
+                    // (404, 500, ...) is a real answer from the site.
+                    if !(has_fs && should_escalate_status(status)) {
+                        return Err(anyhow!(
+                            "FlareClient: direct {} returned HTTP {} for {}",
+                            method,
+                            status,
+                            url
+                        ));
+                    }
+                    info!(
+                        "FlareClient: direct {} returned HTTP {} for {}, escalating",
+                        method, status, url
+                    );
+                    last_error = Some(anyhow!("HTTP {}", status));
                 }
                 Err(e) => {
-                    warn!("FlareClient: direct {} failed for {}: {:#}", method, url, e);
-                    return Err(e);
+                    // Transport errors (DNS block, connection reset, ...) can
+                    // be direct-path-only; the proxy may still get through.
+                    if !has_fs {
+                        return Err(e);
+                    }
+                    warn!(
+                        "FlareClient: direct {} failed for {}, falling back to proxy: {:#}",
+                        method, url, e
+                    );
+                    last_error = Some(e);
                 }
             }
 
@@ -576,21 +618,29 @@ impl FlareClient {
                                 "FlareClient: still challenged (HTTP {}) after re-solve for {} {}",
                                 status, method, url
                             );
+                            last_error = Some(anyhow!("still challenged (HTTP {})", status));
                         }
                         Ok(DirectResult::HttpError(status)) => {
-                            return Err(anyhow!(
-                                "FlareClient: direct {} returned HTTP {} after re-solve for {}",
-                                method,
-                                status,
-                                url
-                            ));
+                            if !should_escalate_status(status) {
+                                return Err(anyhow!(
+                                    "FlareClient: direct {} returned HTTP {} after re-solve for {}",
+                                    method,
+                                    status,
+                                    url
+                                ));
+                            }
+                            info!(
+                                "FlareClient: direct {} returned HTTP {} after re-solve for {}, escalating",
+                                method, status, url
+                            );
+                            last_error = Some(anyhow!("HTTP {} after re-solve", status));
                         }
                         Err(e) => {
                             warn!(
-                                "FlareClient: direct {} failed after re-solve for {}: {:#}",
+                                "FlareClient: direct {} failed after re-solve for {}, falling back to proxy: {:#}",
                                 method, url, e
                             );
-                            return Err(e);
+                            last_error = Some(e);
                         }
                     }
                 }
@@ -622,15 +672,16 @@ impl FlareClient {
                 Ok(text) => return Ok(text),
                 Err(e) => {
                     warn!("FlareClient: proxy {} failed for {}: {:#}", method, url, e);
+                    last_error = Some(e);
                 }
             }
         }
 
-        Err(anyhow!(
-            "FlareClient: all {} attempts failed for {}",
-            method,
-            url
-        ))
+        let base = anyhow!("FlareClient: all {} attempts failed for {}", method, url);
+        Err(match last_error {
+            Some(e) => e.context(base.to_string()),
+            None => base,
+        })
     }
 
     /// Try a direct GET and classify the result.
@@ -654,14 +705,8 @@ impl FlareClient {
         self.fetch_bytes_inner(url, 0)
     }
 
-    fn fetch_bytes_inner(&self, url: &str, depth: u8) -> Result<Bytes> {
-        if depth > 2 {
-            return Err(anyhow!(
-                "Too many wrapper hops while fetching image: {}",
-                url
-            ));
-        }
-
+    /// One throttled image GET with the client's current agent and headers.
+    fn image_request(&self, url: &str) -> Result<HttpResponse, ureq::Error> {
         let (default_headers, agent, origin_url) = {
             let guard = self.lock_inner();
             (
@@ -673,45 +718,37 @@ impl FlareClient {
 
         self.throttle();
         let mut req = agent.get(url);
-
         for (k, v) in default_headers.iter() {
             req = req.header(k, v);
         }
-
         req = build_image_get_with_referer(url, req, Some(&origin_url));
+        req.call()
+    }
 
-        let resp_result = req.call();
+    fn fetch_bytes_inner(&self, url: &str, depth: u8) -> Result<Bytes> {
+        if depth > 2 {
+            return Err(anyhow!(
+                "Too many wrapper hops while fetching image: {}",
+                url
+            ));
+        }
 
-        // If direct image fetch fails with a challenge, try re-solving once
-        let mut resp = match resp_result {
-            Ok(r) => r,
-            Err(e) => {
-                // Check if re-solve might help (network-level 403)
-                if self.re_solve().unwrap_or(false) {
-                    debug!(
-                        "FlareClient: retrying image fetch after re-solve for {}",
-                        url
-                    );
-                    let (default_headers, agent, origin_url) = {
-                        let guard = self.lock_inner();
-                        (
-                            guard.default_headers.clone(),
-                            guard.agent.clone(),
-                            guard.origin_url.clone(),
-                        )
-                    };
+        // A transport error or a block-shaped status (403/429/503) may just
+        // mean expired clearance cookies; re-solve once and retry.
+        let first = self.image_request(url);
+        let blocked = match &first {
+            Ok(resp) => should_escalate_status(resp.status().as_u16()),
+            Err(_) => true,
+        };
 
-                    self.throttle();
-                    let mut retry_req = agent.get(url);
-                    for (k, v) in default_headers.iter() {
-                        retry_req = retry_req.header(k, v);
-                    }
-                    retry_req = build_image_get_with_referer(url, retry_req, Some(&origin_url));
-                    retry_req.call()?
-                } else {
-                    return Err(e.into());
-                }
-            }
+        let mut resp = if blocked && self.re_solve().unwrap_or(false) {
+            debug!(
+                "FlareClient: retrying image fetch after re-solve for {}",
+                url
+            );
+            self.image_request(url)?
+        } else {
+            first?
         };
 
         let status = resp.status();
@@ -824,6 +861,13 @@ fn classify_direct_response(mut resp: HttpResponse) -> Result<DirectResult> {
     } else {
         Ok(DirectResult::Success(body))
     }
+}
+
+/// Statuses that WAF/CDN layers commonly use to block a client rather than
+/// answer the request; worth retrying through re-solve/proxy instead of
+/// failing immediately.
+fn should_escalate_status(status: u16) -> bool {
+    matches!(status, 403 | 429 | 503)
 }
 
 /// Result of a direct HTTP request classified by challenge detection.
@@ -1545,6 +1589,79 @@ mod test {
             !result,
             "re_solve should return Ok(false) when no FS configured"
         );
+    }
+
+    // --- HTTP status semantics ---------------------------------------------
+
+    /// Serve one HTTP response on a local port, return the URL to request.
+    fn serve_once(response: &'static str) -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    const NOT_FOUND_RESPONSE: &str =
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
+
+    #[test]
+    fn test_rate_limited_agent_errors_on_http_status() {
+        // RateLimitedAgent keeps ureq's status-as-error default: callers
+        // parse response bodies unconditionally, so a 404 page must surface
+        // as Err instead of being parsed into empty results.
+        let url = serve_once(NOT_FOUND_RESPONSE);
+        let agent = build_rate_limited_ureq_agent(None, None);
+        assert!(
+            agent.get(&url).call().is_err(),
+            "non-2xx must be an error for RateLimitedAgent"
+        );
+    }
+
+    #[test]
+    fn test_flare_client_classifies_http_error() {
+        // FlareClient's lenient agent must receive non-2xx bodies so
+        // challenge classification can inspect them.
+        let url = serve_once(NOT_FOUND_RESPONSE);
+        let client = FlareClient::plain();
+        match client.try_direct_get(&url).unwrap() {
+            DirectResult::HttpError(status) => assert_eq!(status, 404),
+            DirectResult::Success(_) => panic!("404 should classify as HttpError, got Success"),
+            DirectResult::Challenged(_) => {
+                panic!("404 should classify as HttpError, got Challenged")
+            }
+        }
+    }
+
+    #[test]
+    fn test_fetch_text_propagates_http_error() {
+        // Without FlareSolverr there is nothing to escalate to: a plain 404
+        // must come back as an error naming the status, not a silent body.
+        let url = serve_once(NOT_FOUND_RESPONSE);
+        let client = FlareClient::plain();
+        let err = client.fetch_text(&url).unwrap_err();
+        assert!(
+            err.to_string().contains("404"),
+            "error should carry the HTTP status: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_should_escalate_status() {
+        assert!(should_escalate_status(403));
+        assert!(should_escalate_status(429));
+        assert!(should_escalate_status(503));
+        assert!(!should_escalate_status(404));
+        assert!(!should_escalate_status(500));
+        assert!(!should_escalate_status(200));
     }
 
     // --- RateLimitedAgent --------------------------------------------------

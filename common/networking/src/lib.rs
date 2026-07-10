@@ -741,7 +741,7 @@ impl FlareClient {
             Err(_) => true,
         };
 
-        let mut resp = if blocked && self.re_solve().unwrap_or(false) {
+        let resp = if blocked && self.re_solve().unwrap_or(false) {
             debug!(
                 "FlareClient: retrying image fetch after re-solve for {}",
                 url
@@ -751,45 +751,10 @@ impl FlareClient {
             first?
         };
 
-        let status = resp.status();
-        if status.as_u16() >= 400 {
-            return Err(anyhow!(
-                "Image fetch failed: HTTP {} for {}",
-                status.as_u16(),
-                url
-            ));
+        match parse_image_response(resp, url)? {
+            ImageResponse::Bytes(bytes) => Ok(bytes),
+            ImageResponse::Redirect(next_url) => self.fetch_bytes_inner(&next_url, depth + 1),
         }
-
-        let content_type = resp
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        if content_type.starts_with("text/html") {
-            let html = resp.body_mut().read_to_string()?;
-
-            if let Some(next) = extract_first_img_src(&html) {
-                let next_url = match Url::parse(url).ok().and_then(|base| base.join(&next).ok()) {
-                    Some(u) => u.to_string(),
-                    None => next,
-                };
-                return self.fetch_bytes_inner(&next_url, depth + 1);
-            }
-
-            return Err(anyhow!(
-                "Expected image bytes but got HTML and no <img src=...> found for {}",
-                url
-            ));
-        }
-
-        let data: Vec<u8> = resp
-            .body_mut()
-            .with_config()
-            .limit(LIMIT_BYTES)
-            .read_to_vec()?;
-        Ok(Bytes::from(data))
     }
 
     pub fn post_form_text(&self, url: &str, form: &[(&str, &str)]) -> Result<String> {
@@ -1041,19 +1006,17 @@ fn build_image_get_with_referer(
     req
 }
 
-fn bytes_fetch_impl<F>(do_get: &mut F, url: &str, depth: u8) -> anyhow::Result<Bytes>
-where
-    F: FnMut(&str) -> anyhow::Result<ureq::http::Response<ureq::Body>>,
-{
-    if depth > 2 {
-        return Err(anyhow!(
-            "Too many wrapper hops while fetching image: {}",
-            url
-        ));
-    }
+/// A parsed image response: either the image bytes, or the URL of the real
+/// image when the server answered with an HTML wrapper page.
+enum ImageResponse {
+    Bytes(Bytes),
+    Redirect(String),
+}
 
-    let mut resp = do_get(url)?;
-
+/// Validate status and content type, then read the body: image bytes pass
+/// through, HTML wrapper pages resolve to the first `<img src>` URL. Depth
+/// checks, recursion, and retry logic stay with the callers.
+fn parse_image_response(mut resp: HttpResponse, url: &str) -> Result<ImageResponse> {
     let status = resp.status();
     if status.as_u16() >= 400 {
         return Err(anyhow!(
@@ -1077,7 +1040,7 @@ where
                 Some(u) => u.to_string(),
                 None => next,
             };
-            return bytes_fetch_impl(do_get, &next_url, depth + 1);
+            return Ok(ImageResponse::Redirect(next_url));
         }
 
         return Err(anyhow!(
@@ -1091,7 +1054,25 @@ where
         .with_config()
         .limit(LIMIT_BYTES)
         .read_to_vec()?;
-    Ok(Bytes::from(data))
+    Ok(ImageResponse::Bytes(Bytes::from(data)))
+}
+
+fn bytes_fetch_impl<F>(do_get: &mut F, url: &str, depth: u8) -> anyhow::Result<Bytes>
+where
+    F: FnMut(&str) -> anyhow::Result<ureq::http::Response<ureq::Body>>,
+{
+    if depth > 2 {
+        return Err(anyhow!(
+            "Too many wrapper hops while fetching image: {}",
+            url
+        ));
+    }
+
+    let resp = do_get(url)?;
+    match parse_image_response(resp, url)? {
+        ImageResponse::Bytes(bytes) => Ok(bytes),
+        ImageResponse::Redirect(next_url) => bytes_fetch_impl(do_get, &next_url, depth + 1),
+    }
 }
 
 // Tiny helper: pull the first <img ... src="..."> out of wrapper HTML.

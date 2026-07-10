@@ -360,7 +360,7 @@ impl Extension for Mangadex {
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        self.client.fetch_bytes(&url)
+        self.client.fetch_bytes(&url, Some(URL))
     }
 }
 

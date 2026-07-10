@@ -54,9 +54,9 @@ impl RateLimitedAgent {
         }
     }
 
-    pub fn fetch_bytes(&self, url: &str) -> anyhow::Result<Bytes> {
+    pub fn fetch_bytes(&self, url: &str, referer: Option<&str>) -> anyhow::Result<Bytes> {
         let mut getter = |u: &str| -> anyhow::Result<ureq::http::Response<ureq::Body>> {
-            Ok(self.get(u).image_defaults(u).call()?)
+            Ok(self.get(u).image_defaults_with_referer(u, referer).call()?)
         };
 
         bytes_fetch_impl(&mut getter, url, 0)
@@ -105,6 +105,14 @@ impl<B> RateLimitedRequest<B> {
 impl RateLimitedRequest<WithoutBody> {
     pub fn image_defaults(self, url: &str) -> Self {
         let inner = build_image_get(url, self.inner);
+        Self {
+            inner,
+            limiter: self.limiter,
+        }
+    }
+
+    fn image_defaults_with_referer(self, url: &str, referer: Option<&str>) -> Self {
+        let inner = build_image_get_with_referer(url, self.inner, referer);
         Self {
             inner,
             limiter: self.limiter,
@@ -649,9 +657,13 @@ impl FlareClient {
             ));
         }
 
-        let (default_headers, agent) = {
+        let (default_headers, agent, origin_url) = {
             let guard = self.inner.lock().unwrap();
-            (guard.default_headers.clone(), guard.agent.clone())
+            (
+                guard.default_headers.clone(),
+                guard.agent.clone(),
+                guard.origin_url.clone(),
+            )
         };
 
         self.throttle();
@@ -661,7 +673,7 @@ impl FlareClient {
             req = req.header(k, v);
         }
 
-        req = build_image_get(url, req);
+        req = build_image_get_with_referer(url, req, Some(&origin_url));
 
         let resp_result = req.call();
 
@@ -675,9 +687,13 @@ impl FlareClient {
                         "FlareClient: retrying image fetch after re-solve for {}",
                         url
                     );
-                    let (default_headers, agent) = {
+                    let (default_headers, agent, origin_url) = {
                         let guard = self.inner.lock().unwrap();
-                        (guard.default_headers.clone(), guard.agent.clone())
+                        (
+                            guard.default_headers.clone(),
+                            guard.agent.clone(),
+                            guard.origin_url.clone(),
+                        )
                     };
 
                     self.throttle();
@@ -685,7 +701,7 @@ impl FlareClient {
                     for (k, v) in default_headers.iter() {
                         retry_req = retry_req.header(k, v);
                     }
-                    retry_req = build_image_get(url, retry_req);
+                    retry_req = build_image_get_with_referer(url, retry_req, Some(&origin_url));
                     retry_req.call()?
                 } else {
                     return Err(e.into());
@@ -948,12 +964,24 @@ const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8";
 
 fn build_image_get(
     url: &str,
-    mut req: ureq::RequestBuilder<WithoutBody>,
+    req: ureq::RequestBuilder<WithoutBody>,
 ) -> ureq::RequestBuilder<WithoutBody> {
-    // Build a referer from the target URL origin
-    let referer = Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h)));
+    build_image_get_with_referer(url, req, None)
+}
+
+fn build_image_get_with_referer(
+    url: &str,
+    mut req: ureq::RequestBuilder<WithoutBody>,
+    referer: Option<&str>,
+) -> ureq::RequestBuilder<WithoutBody> {
+    let referer = referer
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h)))
+        });
 
     req = req.header("Accept", IMAGE_ACCEPT);
 
@@ -1740,7 +1768,9 @@ mod test {
     #[ignore]
     fn test_rate_limited_agent_fetch_bytes() {
         let agent = build_rate_limited_ureq_agent(None, Some(5.0));
-        let bytes = agent.fetch_bytes("https://httpbin.org/image/png").unwrap();
+        let bytes = agent
+            .fetch_bytes("https://httpbin.org/image/png", None)
+            .unwrap();
         assert!(!bytes.is_empty());
         assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
     }

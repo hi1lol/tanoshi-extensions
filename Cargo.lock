@@ -689,7 +689,7 @@ dependencies = [
 
 [[package]]
 name = "manhuafast"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "manhwa18cc"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1392,7 +1392,7 @@ dependencies = [
 
 [[package]]
 name = "three_sixty_five_manga"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1754,6 +1754,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "log",
  "networking",
  "scraper",
  "tanoshi-lib",

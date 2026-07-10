@@ -1,6 +1,6 @@
 [package]
 name = "three_sixty_five_manga"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 
 [lib]

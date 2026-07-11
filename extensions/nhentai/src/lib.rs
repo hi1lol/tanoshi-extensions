@@ -114,6 +114,7 @@ struct GalleryApiResponse {
 
 #[derive(Debug, Deserialize)]
 struct GalleryApiPage {
+    number: u32,
     path: String,
 }
 
@@ -335,8 +336,10 @@ fn build_gallery_page_urls(
         return Err(anyhow!("NHentai API returned an empty image server"));
     }
 
-    gallery
-        .pages
+    let mut pages = gallery.pages.iter().collect::<Vec<_>>();
+    pages.sort_by_key(|page| page.number);
+
+    pages
         .iter()
         .map(|page| {
             if page.path.trim().is_empty() {
@@ -962,15 +965,17 @@ mod test {
     }
 
     #[test]
-    fn gallery_api_page_paths_build_cdn_urls() {
+    fn gallery_api_page_numbers_sort_cdn_urls() {
         let gallery = GalleryApiResponse {
             media_id: "123".to_string(),
             pages: vec![
                 GalleryApiPage {
-                    path: "galleries/123/1.jpg".to_string(),
+                    number: 2,
+                    path: "galleries/123/2.webp".to_string(),
                 },
                 GalleryApiPage {
-                    path: "galleries/123/2.webp".to_string(),
+                    number: 1,
+                    path: "galleries/123/1.jpg".to_string(),
                 },
             ],
         };
@@ -1007,7 +1012,7 @@ mod test {
     #[test]
     fn parse_flaresolverr_wrapped_api_response() {
         let response: GalleryApiResponse = parse_api_response(
-            r#"<html><body><pre>{"media_id":"123","pages":[{"path":"galleries/123/1.jpg"}]}</pre></body></html>"#,
+            r#"<html><body><pre>{"media_id":"123","pages":[{"number":1,"path":"galleries/123/1.jpg"}]}</pre></body></html>"#,
             "gallery",
         )
         .unwrap();

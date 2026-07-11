@@ -42,6 +42,7 @@ const SITE_URL: &str = "https://mangadex.org";
 // The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
 const REQUESTS_PER_SECOND: f64 = 5.0;
 const REQUESTS_PER_SECOND_AT_HOME: f64 = 0.6;
+const CHAPTER_PAGE_LIMIT: i64 = 500;
 
 pub struct Mangadex {
     preferences: Vec<Input>,
@@ -339,18 +340,41 @@ impl Extension for Mangadex {
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
-        let url = format!(
-            "{}{}/feed?limit=500&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic&translatedLanguage[]=en&includes[]=scanlation_group",
-            URL, path
-        );
+        let mut offset = 0;
+        let mut chapters = Vec::new();
 
-        let mut resp = self.client.get(&url).call()?;
-        let res: Results = resp.body_mut().read_json()?;
-        if let dto::Data::Multiple { data, .. } = res.data {
-            Ok(data.into_iter().filter_map(map_result_to_chapter).collect())
-        } else {
-            bail!("invalid data");
+        loop {
+            let url = format!(
+                "{}{}/feed?limit={CHAPTER_PAGE_LIMIT}&offset={offset}&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic&translatedLanguage[]=en&includes[]=scanlation_group",
+                URL, path
+            );
+
+            let mut resp = self.client.get(&url).call()?;
+            let res: Results = resp.body_mut().read_json()?;
+            let dto::Data::Multiple {
+                data,
+                offset: response_offset,
+                total,
+                ..
+            } = res.data
+            else {
+                bail!("invalid data");
+            };
+
+            let page_len = data.len() as i64;
+            chapters.extend(data.into_iter().filter_map(map_result_to_chapter));
+
+            let next_offset = response_offset + page_len;
+            if page_len == 0 || next_offset >= total {
+                break;
+            }
+            if next_offset <= offset {
+                bail!("MangaDex chapter feed pagination did not advance");
+            }
+            offset = next_offset;
         }
+
+        Ok(chapters)
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {

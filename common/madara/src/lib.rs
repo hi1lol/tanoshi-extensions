@@ -459,7 +459,7 @@ pub fn get_chapters(
     client: &FlareClient,
 ) -> Result<Vec<ChapterInfo>> {
     let body = client.post_empty_text(
-        &format!("{}{}ajax/chapters", url, path),
+        &format!("{}{}/ajax/chapters", url, path.trim_end_matches('/')),
         &[
             ("Referer", url),
             ("Content-Length", "0"),

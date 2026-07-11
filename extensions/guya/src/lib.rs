@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use guyalib::{get_chapters, get_manga_detail, get_manga_list, get_pages};
 use lazy_static::lazy_static;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
@@ -91,10 +90,7 @@ impl Extension for Guya {
         get_pages(URL, &path, &self.client)
     }
 
-    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        log::debug!("{NAME}: get_image_bytes url={url}");
-        self.client.fetch_bytes(&url, Some(URL))
-    }
+    extension_utils::impl_direct_image_fetch!(client, NAME, URL);
 }
 
 #[cfg(test)]

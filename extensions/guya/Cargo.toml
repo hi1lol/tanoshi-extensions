@@ -9,7 +9,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 anyhow = { workspace = true }
-bytes = { workspace = true }
 extension-utils = { workspace = true }
 guyalib = { path = "../../common/guyalib" }
 lazy_static = { workspace = true }

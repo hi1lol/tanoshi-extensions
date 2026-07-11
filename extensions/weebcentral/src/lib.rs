@@ -1,5 +1,4 @@
 use anyhow::Result;
-use bytes::Bytes;
 use chrono::prelude::*;
 use lazy_static::lazy_static;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
@@ -375,10 +374,7 @@ impl Extension for Weebcentral {
         Ok(panels)
     }
 
-    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        log::debug!("{NAME}: get_image_bytes url={url}");
-        self.client.fetch_bytes(&url, Some(URL))
-    }
+    extension_utils::impl_direct_image_fetch!(client, NAME, URL);
 }
 
 #[cfg(test)]

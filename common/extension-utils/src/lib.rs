@@ -1,7 +1,11 @@
+use bytes::Bytes;
+use networking::RateLimitedAgent;
 use tanoshi_lib::prelude::{Extension, Input, PluginRegistrar};
 
 #[doc(hidden)]
 pub use anyhow;
+#[doc(hidden)]
+pub use bytes;
 #[doc(hidden)]
 pub use tanoshi_lib;
 
@@ -32,6 +36,18 @@ pub fn register_extension<E>(
     networking::init_plugin_logging();
     log::info!(target: log_target, "Registering {name} extension v{version}");
     registrar.register_function(Box::new(E::default()));
+}
+
+#[doc(hidden)]
+pub fn fetch_direct_image(
+    client: &RateLimitedAgent,
+    name: &str,
+    url: String,
+    referer: &str,
+    log_target: &str,
+) -> anyhow::Result<Bytes> {
+    log::debug!(target: log_target, "{name}: get_image_bytes url={url}");
+    client.fetch_bytes(&url, Some(referer))
 }
 
 /// Generate the exported plugin declaration and its registration function.
@@ -67,6 +83,19 @@ macro_rules! impl_preferences {
             &self,
         ) -> $crate::anyhow::Result<::std::vec::Vec<$crate::tanoshi_lib::prelude::Input>> {
             ::core::result::Result::Ok(self.$field.clone())
+        }
+    };
+}
+
+/// Generate direct image fetching through a `RateLimitedAgent` field.
+#[macro_export]
+macro_rules! impl_direct_image_fetch {
+    ($field:ident, $name:expr, $referer:expr $(,)?) => {
+        fn get_image_bytes(
+            &self,
+            url: ::std::string::String,
+        ) -> $crate::anyhow::Result<$crate::bytes::Bytes> {
+            $crate::fetch_direct_image(&self.$field, $name, url, $referer, module_path!())
         }
     };
 }

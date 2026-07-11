@@ -6,7 +6,6 @@ use crate::dto::{
     manga::{ListOrder, Order, Rating, request},
 };
 use anyhow::{Result, anyhow, bail};
-use bytes::Bytes;
 use dto::ResultsAtHome;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
@@ -403,10 +402,7 @@ impl Extension for Mangadex {
         filter::FILTER_LIST.clone()
     }
 
-    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        log::debug!("{NAME}: get_image_bytes url={url}");
-        self.client.fetch_bytes(&url, Some(SITE_URL))
-    }
+    extension_utils::impl_direct_image_fetch!(client, NAME, SITE_URL);
 }
 
 #[cfg(test)]

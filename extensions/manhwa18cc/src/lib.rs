@@ -1,5 +1,4 @@
 use anyhow::{anyhow, bail};
-use bytes::Bytes;
 use lazy_static::lazy_static;
 use madara::{get_chapters_old, get_manga_detail, parse_manga_list, search_manga_old};
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
@@ -119,10 +118,7 @@ impl Extension for Manhwa18cc {
         Ok(pages)
     }
 
-    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        log::debug!("{NAME}: get_image_bytes url={url}");
-        self.client.fetch_bytes(&url, Some(URL))
-    }
+    extension_utils::impl_direct_image_fetch!(client, NAME, URL);
 }
 
 #[cfg(test)]

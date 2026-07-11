@@ -8,6 +8,10 @@ use tanoshi_lib::prelude::*;
 
 use crate::dto::{Detail, Series};
 
+fn first_group_key(groups: &HashMap<String, Vec<String>>) -> Option<&str> {
+    groups.keys().map(String::as_str).min()
+}
+
 pub fn get_manga_list(
     url: &str,
     source_id: i64,
@@ -69,21 +73,17 @@ pub fn get_chapters(
 
     let mut chapters = vec![];
     for (number, chapter) in series.chapters {
+        let group = first_group_key(&chapter.groups);
         chapters.push(ChapterInfo {
             source_id,
             title: chapter.title.clone(),
-            path: format!("{}/{}", path, number),
+            path: format!("{}/{}", path.trim_end_matches('/'), number),
             number: number.parse().unwrap_or_default(),
-            scanlator: if let Some(group) = chapter.groups.into_keys().next() {
-                series.groups.clone().get(&group).cloned()
-            } else {
-                None
-            },
-            uploaded: if let Some(date) = chapter.release_date.into_values().next() {
-                date as i64
-            } else {
-                0
-            },
+            scanlator: group.and_then(|group| series.groups.get(group).cloned()),
+            uploaded: group
+                .and_then(|group| chapter.release_date.get(group))
+                .copied()
+                .unwrap_or_default() as i64,
         })
     }
 
@@ -91,21 +91,22 @@ pub fn get_chapters(
 }
 
 pub fn get_pages(url: &str, path: &str, client: &RateLimitedAgent) -> Result<Vec<String>> {
-    let split: Vec<_> = path.rsplitn(2, '/').collect();
+    let path = path.trim_end_matches('/');
+    let (series_path, chapter_number) = path
+        .rsplit_once('/')
+        .ok_or_else(|| anyhow::anyhow!("invalid Guya chapter path: {path}"))?;
 
-    let mut resp = client.get(&format!("{}{}", url, split[1])).call()?;
+    let mut resp = client.get(&format!("{}{}", url, series_path)).call()?;
     let text = resp.body_mut().read_to_string()?;
     let series: Series = serde_json::from_str(&text)?;
 
     let pages = series
         .chapters
-        .get(split[0])
+        .get(chapter_number)
         .and_then(|chapter| {
-            chapter
-                .groups
-                .iter()
-                .next()
-                .map(|(group, pages)| (chapter.folder.clone(), group, pages))
+            let group = first_group_key(&chapter.groups)?;
+            let pages = chapter.groups.get(group)?;
+            Some((chapter.folder.clone(), group, pages))
         })
         .map(|(folder, group, pages)| {
             pages

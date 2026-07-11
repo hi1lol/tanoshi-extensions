@@ -1,6 +1,6 @@
 [package]
 name = "manhwa18cc"
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 
 [lib]
@@ -14,3 +14,4 @@ anyhow = "1"
 scraper = "0.24"
 lazy_static = "1"
 bytes = "1"
+log = "0.4"

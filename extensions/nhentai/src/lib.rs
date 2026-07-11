@@ -3,7 +3,7 @@ use bytes::Bytes;
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use networking::{FlareClient, build_rate_limited_flaresolverr_client};
+use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
 use scraper::{Html, Selector};
 use std::env;
 use tanoshi_lib::prelude::{
@@ -19,6 +19,12 @@ const REQUESTS_PER_SECOND: f64 = 10.0;
 tanoshi_lib::export_plugin!(register);
 
 fn register(registrar: &mut dyn PluginRegistrar) {
+    networking::init_plugin_logging();
+    log::info!(
+        "Registering {} extension v{}",
+        NAME,
+        env!("CARGO_PKG_VERSION")
+    );
     registrar.register_function(Box::new(NHentai::default()));
 }
 
@@ -92,7 +98,11 @@ impl Default for NHentai {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND)),
+            client: build_rate_limited_flaresolverr_client_for_extension(
+                URL,
+                Some(REQUESTS_PER_SECOND),
+                "nhentai",
+            ),
         }
     }
 }
@@ -297,12 +307,14 @@ impl Extension for NHentai {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+        log::debug!("{NAME}: get_popular_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
         self.get_manga_list(&format!("{URL}/search/?q={q}&sort=popular&page={page}"))
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+        log::debug!("{NAME}: get_latest_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
         self.get_manga_list(&format!("{URL}/search/?q={q}&page={page}"))
@@ -314,6 +326,7 @@ impl Extension for NHentai {
         query: Option<String>,
         filters: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<MangaInfo>> {
+        log::debug!("{NAME}: search_manga page={page} query={query:?}");
         let url = if let Some(filters) = filters {
             let (q_raw, sort) = self.query_parts(Some(filters));
             let q = encode(&q_raw);
@@ -331,6 +344,7 @@ impl Extension for NHentai {
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
+        log::debug!("{NAME}: get_manga_detail path={path}");
         let url = format!("{}{}", URL, path);
         // Send the request and get the response as a string
         let res = self
@@ -457,6 +471,7 @@ impl Extension for NHentai {
     }
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
+        log::debug!("{NAME}: get_chapters path={path}");
         let url = format!("{}{}", URL, path);
 
         // Send the request and get the response as a string
@@ -498,6 +513,7 @@ impl Extension for NHentai {
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+        log::debug!("{NAME}: get_pages path={path}");
         let url = format!("{}{}", URL, path);
 
         let res = self
@@ -547,6 +563,7 @@ impl Extension for NHentai {
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+        log::debug!("{NAME}: get_image_bytes url={url}");
         self.client.fetch_bytes(&url)
     }
 }

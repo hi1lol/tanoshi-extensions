@@ -13,6 +13,12 @@ const REQUESTS_PER_SECOND: f64 = 10.0;
 tanoshi_lib::export_plugin!(register);
 
 fn register(registrar: &mut dyn PluginRegistrar) {
+    networking::init_plugin_logging();
+    log::info!(
+        "Registering {} extension v{}",
+        NAME,
+        env!("CARGO_PKG_VERSION")
+    );
     registrar.register_function(Box::new(Guya::default()));
 }
 
@@ -67,10 +73,12 @@ impl Extension for Guya {
         &self,
         _page: i64,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: get_popular_manga");
         get_manga_list(URL, ID, &self.client)
     }
 
     fn get_latest_manga(&self, _page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: get_latest_manga");
         get_manga_list(URL, ID, &self.client)
     }
 
@@ -80,6 +88,7 @@ impl Extension for Guya {
         query: Option<String>,
         _filters: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+        log::debug!("{NAME}: search_manga query={query:?}");
         let manga = get_manga_list(URL, ID, &self.client)?;
 
         if let Some(query) = query {
@@ -93,19 +102,23 @@ impl Extension for Guya {
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
+        log::debug!("{NAME}: get_manga_detail path={path}");
         get_manga_detail(URL, &path, ID, &self.client)
     }
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
+        log::debug!("{NAME}: get_chapters path={path}");
         get_chapters(URL, &path, ID, &self.client)
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+        log::debug!("{NAME}: get_pages path={path}");
         get_pages(URL, &path, &self.client)
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        self.client.fetch_bytes(&url)
+        log::debug!("{NAME}: get_image_bytes url={url}");
+        self.client.fetch_bytes(&url, Some(URL))
     }
 }
 

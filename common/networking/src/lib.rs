@@ -5,9 +5,11 @@ use bytes::Bytes;
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
 use log::{debug, info, warn};
 use ratelimit::RateLimiter;
+use scraper::{Html, Selector};
 use serde_json::{Value as JsonValue, json};
 use std::error::Error;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
+use std::time::{Duration, Instant};
 use ureq::typestate::{WithBody, WithoutBody};
 use ureq::{
     Cookie,
@@ -20,6 +22,31 @@ pub type Agent = ureq::Agent;
 pub type HttpResponse = ureq::http::Response<ureq::Body>;
 
 const LIMIT_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
+const DIRECT_RETRY_COOLDOWN: Duration = Duration::from_secs(15 * 60);
+
+// Session discovery/creation is rare, but multiple extension instances can
+// race to initialize the same named session. Serialize that small critical
+// section so we do not issue duplicate sessions.create calls.
+static FLARESOLVERR_SESSION_INIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// User agent for FlareClient agents before the first FlareSolverr solve
+/// replaces them with the solved browser's UA. Sites that block default
+/// library user agents outright would otherwise 403 every first contact.
+const DEFAULT_BROWSER_UA: &str =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0";
+
+/// Install a logger for code running inside an extension, once, the first
+/// time a client is built. Extensions are cdylibs: the host application's
+/// logger never reaches the plugin's own `log` facade, so without this every
+/// log line in extension code is silently dropped. Controlled by RUST_LOG
+/// (e.g. RUST_LOG=networking=debug), defaults to info, writes to stderr.
+pub fn init_plugin_logging() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
+            .try_init();
+    });
+}
 
 #[derive(Clone)]
 pub struct RateLimitedAgent {
@@ -29,7 +56,8 @@ pub struct RateLimitedAgent {
 
 impl RateLimitedAgent {
     pub fn new(inner: ureq::Agent, requests_per_second: Option<f64>) -> Self {
-        info!(
+        init_plugin_logging();
+        debug!(
             "Net RateLimitedAgent setup with {:?} RPS",
             requests_per_second
         );
@@ -42,6 +70,7 @@ impl RateLimitedAgent {
         RateLimitedRequest {
             inner: self.inner.get(url),
             limiter: self.limiter.clone(),
+            url: url.to_string(),
         }
     }
 
@@ -49,12 +78,13 @@ impl RateLimitedAgent {
         RateLimitedRequest {
             inner: self.inner.post(url),
             limiter: self.limiter.clone(),
+            url: url.to_string(),
         }
     }
 
-    pub fn fetch_bytes(&self, url: &str) -> anyhow::Result<Bytes> {
+    pub fn fetch_bytes(&self, url: &str, referer: Option<&str>) -> anyhow::Result<Bytes> {
         let mut getter = |u: &str| -> anyhow::Result<ureq::http::Response<ureq::Body>> {
-            Ok(self.get(u).image_defaults(u).call()?)
+            Ok(self.get(u).image_defaults_with_referer(u, referer).call()?)
         };
 
         bytes_fetch_impl(&mut getter, url, 0)
@@ -64,6 +94,7 @@ impl RateLimitedAgent {
 pub struct RateLimitedRequest<B> {
     inner: ureq::RequestBuilder<B>,
     limiter: Option<Arc<RateLimiter>>,
+    url: String,
 }
 
 impl<B> RateLimitedRequest<B> {
@@ -84,6 +115,7 @@ impl<B> RateLimitedRequest<B> {
         Self {
             inner: self.inner.header(key, value),
             limiter: self.limiter,
+            url: self.url,
         }
     }
 
@@ -95,6 +127,7 @@ impl<B> RateLimitedRequest<B> {
         Self {
             inner: self.inner.query(key, value),
             limiter: self.limiter,
+            url: self.url,
         }
     }
 }
@@ -106,11 +139,22 @@ impl RateLimitedRequest<WithoutBody> {
         Self {
             inner,
             limiter: self.limiter,
+            url: self.url,
+        }
+    }
+
+    fn image_defaults_with_referer(self, url: &str, referer: Option<&str>) -> Self {
+        let inner = build_image_get_with_referer(url, self.inner, referer);
+        Self {
+            inner,
+            limiter: self.limiter,
+            url: self.url,
         }
     }
 
     pub fn call(self) -> Result<HttpResponse, ureq::Error> {
         self.throttle();
+        debug!("GET {}", self.url);
         self.inner.call()
     }
 }
@@ -119,6 +163,7 @@ impl RateLimitedRequest<WithoutBody> {
 impl RateLimitedRequest<WithBody> {
     pub fn send_empty(self) -> Result<HttpResponse, ureq::Error> {
         self.throttle();
+        debug!("POST (empty) {}", self.url);
         self.inner.send_empty()
     }
 
@@ -129,11 +174,13 @@ impl RateLimitedRequest<WithBody> {
         V: AsRef<str>,
     {
         self.throttle();
+        debug!("POST (form) {}", self.url);
         self.inner.send_form(form)
     }
 
     pub fn send_json<T: serde::Serialize>(self, value: &T) -> Result<HttpResponse, ureq::Error> {
         self.throttle();
+        debug!("POST (json) {}", self.url);
         self.inner.send_json(value)
     }
 }
@@ -183,6 +230,24 @@ pub fn build_ureq_agent(user_agent: Option<&str>) -> Agent {
     cfg.build().into()
 }
 
+/// Agent for FlareClient's internal requests. Non-2xx statuses are returned
+/// as responses instead of errors so challenge classification can read the
+/// body of 403/503 pages; callers must check the status themselves. Plain
+/// `RateLimitedAgent` users keep ureq's status-as-error default via
+/// `build_ureq_agent` so HTTP failures surface as errors, not parseable
+/// bodies.
+fn build_lenient_ureq_agent(user_agent: Option<&str>) -> Agent {
+    let mut cfg = Agent::config_builder()
+        .max_redirects(5)
+        .http_status_as_error(false);
+    if let Some(ua) = user_agent {
+        if !ua.is_empty() {
+            cfg = cfg.user_agent(ua);
+        }
+    }
+    cfg.build().into()
+}
+
 pub fn build_rate_limited_ureq_agent(
     user_agent: Option<&str>,
     requests_per_second: Option<f64>,
@@ -196,6 +261,19 @@ pub fn build_rate_limited_flaresolverr_client(
     requests_per_second: Option<f64>,
 ) -> FlareClient {
     FlareClient::from_env_with_rps(origin_url, requests_per_second)
+        .unwrap_or_else(|_| FlareClient::plain_with_rps(requests_per_second))
+}
+
+/// Build a FlareClient with a persistent, extension-scoped FlareSolverr
+/// session. The session is discovered/created lazily on the first request
+/// that needs FlareSolverr, then reused by subsequent requests.
+pub fn build_rate_limited_flaresolverr_client_for_extension(
+    origin_url: &str,
+    requests_per_second: Option<f64>,
+    extension_name: &str,
+) -> FlareClient {
+    let session_name = format!("tanoshi-{extension_name}");
+    FlareClient::from_env_with_rps_and_session(origin_url, requests_per_second, Some(&session_name))
         .unwrap_or_else(|_| FlareClient::plain_with_rps(requests_per_second))
 }
 
@@ -282,6 +360,68 @@ pub fn build_flaresolverr_client(
     Ok(agent)
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct FlareSolverrSessionListResponse {
+    status: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    sessions: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FlareSolverrSessionCreateResponse {
+    status: String,
+    #[serde(default)]
+    message: String,
+    session: Option<String>,
+}
+
+fn list_flaresolverr_sessions(flaresolverr_url: &str) -> Result<Vec<String>> {
+    let payload = json!({"cmd": "sessions.list"});
+    let mut response = ureq::post(flaresolverr_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = response.body_mut().read_to_string()?;
+    let body: FlareSolverrSessionListResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!(
+            "FlareSolverr sessions.list failed: {}",
+            body.message
+        ));
+    }
+    Ok(body.sessions)
+}
+
+fn create_flaresolverr_session(flaresolverr_url: &str, session_name: &str) -> Result<String> {
+    let payload = json!({
+        "cmd": "sessions.create",
+        "session": session_name,
+    });
+    let mut response = ureq::post(flaresolverr_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = response.body_mut().read_to_string()?;
+    let body: FlareSolverrSessionCreateResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!(
+            "FlareSolverr sessions.create failed: {}",
+            body.message
+        ));
+    }
+    body.session.ok_or_else(|| {
+        anyhow!("FlareSolverr sessions.create succeeded without returning a session ID")
+    })
+}
+
+fn is_missing_flaresolverr_session(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("session")
+        && (message.contains("not found")
+            || message.contains("does not exist")
+            || message.contains("invalid"))
+}
+
 /// Internal, mutable state wrapped by a Mutex.
 #[derive(Clone)]
 struct Inner {
@@ -289,13 +429,18 @@ struct Inner {
     origin_url: String,
     flaresolverr_url: Option<String>,
     session_id: Option<String>,
+    /// Named session to create/reuse when no explicit FLARESOLVERR_SESSION
+    /// override was provided.
+    session_name: Option<String>,
     default_headers: Vec<(String, String)>,
     limiter: Option<Arc<RateLimiter>>,
     /// Tracks whether direct requests work for this site.
-    /// Starts `true` (optimistic). Flips to `false` after the first
+    /// Starts `true` (optimistic). Flips to `false` after a challenged
     /// direct+re-solve cycle fails, so subsequent requests skip straight
     /// to the FlareSolverr proxy without wasting round-trips.
     direct_works: bool,
+    /// When direct requests may be tried again after a failed challenge cycle.
+    direct_disabled_until: Option<Instant>,
 }
 
 /// Public handle that is Send + Sync.
@@ -305,7 +450,8 @@ pub struct FlareClient {
 }
 
 /// Heuristic: does this response body look like a Cloudflare challenge page?
-fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
+/// Returns the marker that matched so routing decisions can be traced in logs.
+fn cf_challenge_marker(status: u16, body: &str) -> Option<&'static str> {
     let lower = body.to_ascii_lowercase();
 
     // Cloudflare challenge pages contain characteristic markers.
@@ -319,7 +465,16 @@ fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
         && lower.contains("cloudflare");
 
     if has_cf_markers {
-        return true;
+        if lower.contains("cf-browser-verification") {
+            return Some("cf-browser-verification");
+        }
+        if lower.contains("cf_chl_opt") {
+            return Some("cf_chl_opt");
+        }
+        if lower.contains("challenge-platform") {
+            return Some("challenge-platform");
+        }
+        return Some("just a moment");
     }
 
     // Cloudflare sometimes returns very short 403/503 bodies that lack the usual
@@ -327,17 +482,22 @@ fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
     // page, or a turnstile script. Check for these narrower patterns only on
     // status codes that Cloudflare commonly uses for challenges.
     if (status == 403 || status == 503) && lower.contains("cloudflare") {
-        return true;
+        return Some("403/503 status mentioning cloudflare");
     }
 
-    false
+    None
+}
+
+#[cfg(test)]
+fn looks_like_cf_challenge(status: u16, body: &str) -> bool {
+    cf_challenge_marker(status, body).is_some()
 }
 
 impl FlareClient {
     #[inline]
     fn throttle(&self) {
         let limiter = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             guard.limiter.clone()
         };
         if let Some(l) = limiter {
@@ -345,109 +505,251 @@ impl FlareClient {
         }
     }
 
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, Inner> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn session_for_request(&self) -> Result<Option<String>> {
+        let existing = { self.lock_inner().session_id.clone() };
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        self.ensure_named_session()
+    }
+
+    /// Resolve the configured named session exactly once per FlareClient.
+    /// Multiple clients use a process-wide lock so they can safely converge on
+    /// the same extension-scoped session without racing sessions.create.
+    fn ensure_named_session(&self) -> Result<Option<String>> {
+        let (flaresolverr_url, session_name, session_id) = {
+            let guard = self.lock_inner();
+            (
+                guard.flaresolverr_url.clone(),
+                guard.session_name.clone(),
+                guard.session_id.clone(),
+            )
+        };
+
+        if session_id.is_some() {
+            return Ok(session_id);
+        }
+        let (Some(flaresolverr_url), Some(session_name)) = (flaresolverr_url, session_name) else {
+            return Ok(None);
+        };
+
+        let _init_guard = FLARESOLVERR_SESSION_INIT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Another FlareClient may have initialized this shared session while
+        // we waited for the process-wide lock.
+        {
+            let guard = self.lock_inner();
+            if guard.session_id.is_some() {
+                return Ok(guard.session_id.clone());
+            }
+        }
+
+        let session_id = if list_flaresolverr_sessions(&flaresolverr_url)?
+            .iter()
+            .any(|session| session == &session_name)
+        {
+            debug!(
+                "FlareClient: reusing existing FlareSolverr session {}",
+                session_name
+            );
+            session_name
+        } else {
+            info!(
+                "FlareClient: creating FlareSolverr session {}",
+                session_name
+            );
+            create_flaresolverr_session(&flaresolverr_url, &session_name)?
+        };
+
+        let mut guard = self.lock_inner();
+        if guard.session_id.is_none() {
+            guard.session_id = Some(session_id.clone());
+        }
+        Ok(guard.session_id.clone())
+    }
+
+    fn uses_named_session(&self) -> bool {
+        self.lock_inner().session_name.is_some()
+    }
+
+    fn clear_named_session(&self) {
+        let mut guard = self.lock_inner();
+        if guard.session_name.is_some() {
+            guard.session_id = None;
+        }
+    }
+
+    fn proxy_with_session_retry<P>(
+        &self,
+        flaresolverr_url: &str,
+        method: &str,
+        url: &str,
+        session_id: Option<&str>,
+        proxy_request: &P,
+    ) -> Result<String>
+    where
+        P: Fn(&str, Option<&str>, &str) -> Result<String>,
+    {
+        match proxy_request(flaresolverr_url, session_id, url) {
+            Ok(text) => Ok(text),
+            Err(error)
+                if session_id.is_some()
+                    && self.uses_named_session()
+                    && is_missing_flaresolverr_session(&error) =>
+            {
+                warn!(
+                    "FlareClient: session disappeared while proxying {} {}, refreshing it: {:#}",
+                    method, url, error
+                );
+                self.clear_named_session();
+                let refreshed_session = self.ensure_named_session()?.ok_or_else(|| {
+                    anyhow!(
+                        "FlareClient: named FlareSolverr session unavailable for {} {}",
+                        method,
+                        url
+                    )
+                })?;
+                proxy_request(flaresolverr_url, Some(&refreshed_session), url)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Re-solve via FlareSolverr and update the internal agent + headers.
     /// Returns Ok(true) if re-solve succeeded, Ok(false) if no FS configured.
     fn re_solve(&self) -> Result<bool> {
-        let (fs_url, origin_url, session_id) = {
-            let guard = self.inner.lock().unwrap();
+        let (fs_url, origin_url) = {
+            let guard = self.lock_inner();
             match &guard.flaresolverr_url {
-                Some(url) => (
-                    url.clone(),
-                    guard.origin_url.clone(),
-                    guard.session_id.clone(),
-                ),
+                Some(url) => (url.clone(), guard.origin_url.clone()),
                 None => return Ok(false),
             }
         };
+        let session_id = self.session_for_request()?;
 
-        info!(
+        debug!(
             "FlareClient: re-solving challenge via FlareSolverr for {}",
             origin_url
         );
 
-        let solved = solve_with_flaresolverr(&fs_url, &origin_url, session_id.as_deref())?;
-        let new_agent = build_ureq_agent(Some(&solved.user_agent));
+        let solved = match solve_with_flaresolverr(&fs_url, &origin_url, session_id.as_deref()) {
+            Ok(solved) => solved,
+            Err(error)
+                if session_id.is_some()
+                    && self.uses_named_session()
+                    && is_missing_flaresolverr_session(&error) =>
+            {
+                warn!(
+                    "FlareClient: session disappeared while re-solving {}, refreshing it: {:#}",
+                    origin_url, error
+                );
+                self.clear_named_session();
+                let refreshed_session = self.ensure_named_session()?.ok_or_else(|| {
+                    anyhow!(
+                        "FlareClient: named FlareSolverr session unavailable for {}",
+                        origin_url
+                    )
+                })?;
+                solve_with_flaresolverr(&fs_url, &origin_url, Some(&refreshed_session))?
+            }
+            Err(error) => return Err(error),
+        };
+        let new_agent = build_lenient_ureq_agent(Some(&solved.user_agent));
         insert_flaresolverr_cookies_into_agent(&new_agent, solved.cookies);
 
         {
-            let mut guard = self.inner.lock().unwrap();
+            let mut guard = self.lock_inner();
             guard.agent = new_agent;
             guard.default_headers = solved.headers;
         }
 
-        info!("FlareClient: re-solve succeeded, agent updated");
+        debug!("FlareClient: re-solve succeeded, agent updated");
         Ok(true)
     }
 
     pub fn plain_with_rps(requests_per_second: Option<f64>) -> Self {
+        init_plugin_logging();
         let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         FlareClient {
             inner: Arc::new(Mutex::new(Inner {
-                agent: build_ureq_agent(None),
+                agent: build_lenient_ureq_agent(Some(DEFAULT_BROWSER_UA)),
                 origin_url: String::new(),
                 flaresolverr_url: None,
                 session_id: None,
+                session_name: None,
                 default_headers: vec![],
                 limiter,
                 direct_works: true,
+                direct_disabled_until: None,
             })),
         }
     }
 
     pub fn from_env_with_rps(origin_url: &str, requests_per_second: Option<f64>) -> Result<Self> {
+        Self::from_env_with_rps_and_session(origin_url, requests_per_second, None)
+    }
+
+    /// Construct a client with an optional named FlareSolverr session.
+    ///
+    /// The session is initialized lazily, after a request actually needs
+    /// FlareSolverr. An explicit FLARESOLVERR_SESSION always takes precedence
+    /// and is never created, refreshed, or destroyed by this client.
+    pub fn from_env_with_rps_and_session(
+        origin_url: &str,
+        requests_per_second: Option<f64>,
+        session_name: Option<&str>,
+    ) -> Result<Self> {
+        init_plugin_logging();
         let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         let flaresolverr_url = std::env::var("FLARESOLVERR_URL").ok();
-        debug!("FLARESOLVERR_URL={:?}", flaresolverr_url);
+        debug!(
+            "FlareClient for {}: FLARESOLVERR_URL={:?}",
+            origin_url, flaresolverr_url
+        );
 
         if flaresolverr_url.is_none() {
             return Ok(Self {
                 inner: Arc::new(Mutex::new(Inner {
-                    agent: build_ureq_agent(None),
+                    agent: build_lenient_ureq_agent(Some(DEFAULT_BROWSER_UA)),
                     origin_url: origin_url.to_string(),
                     flaresolverr_url: None,
                     session_id: None,
+                    session_name: session_name
+                        .filter(|name| !name.trim().is_empty())
+                        .map(str::to_string),
                     default_headers: vec![],
                     limiter,
                     direct_works: true,
+                    direct_disabled_until: None,
                 })),
             });
         }
 
         let flaresolverr_url = flaresolverr_url.unwrap();
-        // Optional session
-        let mut session_id = std::env::var("FLARESOLVERR_SESSION").ok();
-        if session_id.is_none() {
-            if let Ok(mut resp) = ureq::post(&flaresolverr_url)
-                .header("Content-Type", "application/json")
-                .send_json(&json!({"cmd":"sessions.create"}))
-            {
-                if let Ok(text) = resp.body_mut().read_to_string() {
-                    #[derive(serde::Deserialize)]
-                    struct Created {
-                        status: String,
-                        session: Option<String>,
-                    }
-                    if let Ok(Created { status, session }) = serde_json::from_str(&text) {
-                        if status == "ok" {
-                            session_id = session;
-                        }
-                    }
-                }
-            }
-        }
+        let session_id = std::env::var("FLARESOLVERR_SESSION")
+            .ok()
+            .filter(|session| !session.trim().is_empty());
+        let session_name = if session_id.is_none() {
+            session_name
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        };
 
-        // Try initial solve; on failure fall back to plain agent.
-        let (agent, default_headers) =
-            match solve_with_flaresolverr(&flaresolverr_url, origin_url, session_id.as_deref()) {
-                Ok(solved) => {
-                    let a = build_ureq_agent(Some(&solved.user_agent));
-                    insert_flaresolverr_cookies_into_agent(&a, solved.cookies);
-                    (a, solved.headers)
-                }
-                Err(_) => (build_ureq_agent(None), vec![]),
-            };
+        // Solve lazily on the first challenge instead of blocking construction.
+        let agent = build_lenient_ureq_agent(Some(DEFAULT_BROWSER_UA));
+        let default_headers = vec![];
 
         Ok(Self {
             inner: Arc::new(Mutex::new(Inner {
@@ -455,9 +757,11 @@ impl FlareClient {
                 origin_url: origin_url.to_string(),
                 flaresolverr_url: Some(flaresolverr_url),
                 session_id,
+                session_name,
                 default_headers,
                 limiter,
                 direct_works: true,
+                direct_disabled_until: None,
             })),
         })
     }
@@ -476,121 +780,229 @@ impl FlareClient {
         Self::from_env_with_rps(origin_url, None)
     }
 
-    /// Thread-safe: takes &self. Internally locks, mutates as needed.
-    ///
-    /// Strategy: direct-first, proxy-on-failure with learning.
-    ///   1. If direct requests have worked before (or never been tried), try a
-    ///      direct GET using the current agent.
-    ///   2. If challenged, re-solve via FlareSolverr and retry direct once.
-    ///   3. If direct still fails, mark `direct_works = false` so future
-    ///      requests skip straight to the proxy, then proxy this request.
-    ///   4. On subsequent calls with `direct_works = false`, go straight to proxy.
-    pub fn fetch_text(&self, url: &str) -> Result<String> {
-        let (should_try_direct, has_fs) = {
-            let guard = self.inner.lock().unwrap();
-            (guard.direct_works, guard.flaresolverr_url.is_some())
+    fn direct_path_state(&self) -> (bool, bool) {
+        let mut guard = self.lock_inner();
+        let should_try_direct = if guard.direct_works {
+            true
+        } else if guard
+            .direct_disabled_until
+            .is_some_and(|until| Instant::now() >= until)
+        {
+            debug!(
+                "FlareClient: direct path cooldown expired for {}, retrying direct",
+                guard.origin_url
+            );
+            guard.direct_works = true;
+            guard.direct_disabled_until = None;
+            true
+        } else {
+            let remaining = guard
+                .direct_disabled_until
+                .map(|until| until.saturating_duration_since(Instant::now()));
+            debug!(
+                "FlareClient: direct path disabled for {} ({:?} cooldown remaining), going straight to proxy",
+                guard.origin_url, remaining
+            );
+            false
         };
 
+        (should_try_direct, guard.flaresolverr_url.is_some())
+    }
+
+    fn disable_direct_path(&self) {
+        let mut guard = self.lock_inner();
+        guard.direct_works = false;
+        guard.direct_disabled_until = Some(Instant::now() + DIRECT_RETRY_COOLDOWN);
+    }
+
+    /// Thread-safe: takes &self. Internally locks, mutates as needed.
+    ///
+    /// Strategy: direct-first, proxy-on-challenge with learning.
+    ///   1. If direct requests have worked before (or never been tried), try a
+    ///      direct GET using the current agent.
+    ///   2. If challenged, lazily re-solve via FlareSolverr and retry direct once.
+    ///   3. If direct is still challenged, mark `direct_works = false` so
+    ///      future requests skip straight to the proxy, then proxy this request.
+    ///   4. After a cooldown, try the direct path again.
+    pub fn fetch_text(&self, url: &str) -> Result<String> {
+        self.request_with_ladder(
+            "GET",
+            url,
+            |client, request_url| client.try_direct_get(request_url),
+            |fs_url, session_id, request_url| proxy_fetch_text(fs_url, session_id, request_url),
+        )
+    }
+
+    fn request_with_ladder<D, P>(
+        &self,
+        method: &str,
+        url: &str,
+        direct_request: D,
+        proxy_request: P,
+    ) -> Result<String>
+    where
+        D: Fn(&Self, &str) -> Result<DirectResult>,
+        P: Fn(&str, Option<&str>, &str) -> Result<String>,
+    {
+        self.throttle();
+        let (should_try_direct, has_fs) = self.direct_path_state();
+        let mut last_error: Option<anyhow::Error> = None;
+
         if should_try_direct {
-            // --- Attempt 1: direct GET with current agent ---
-            debug!("FlareClient: direct GET {}", url);
-            self.throttle();
-            match self.try_direct_get(url) {
+            debug!("FlareClient: direct {} {}", method, url);
+            match direct_request(self, url) {
                 Ok(DirectResult::Success(text)) => {
-                    debug!("FlareClient: direct GET succeeded for {}", url);
+                    debug!("FlareClient: direct {} succeeded for {}", method, url);
                     return Ok(text);
                 }
                 Ok(DirectResult::Challenged(status)) => {
-                    info!(
-                        "FlareClient: direct GET got challenged (HTTP {}) for {}",
-                        status, url
+                    debug!(
+                        "FlareClient: direct {} got challenged (HTTP {}) for {}",
+                        method, status, url
                     );
+                    last_error = Some(anyhow!("challenged (HTTP {})", status));
+                }
+                Ok(DirectResult::HttpError(status)) => {
+                    // Statuses that WAF/CDN layers use to block clients may
+                    // still succeed through re-solve/proxy; anything else
+                    // (404, 500, ...) is a real answer from the site.
+                    if !(has_fs && should_escalate_status(status)) {
+                        return Err(anyhow!(
+                            "FlareClient: direct {} returned HTTP {} for {}",
+                            method,
+                            status,
+                            url
+                        ));
+                    }
+                    debug!(
+                        "FlareClient: direct {} returned HTTP {} for {}, escalating",
+                        method, status, url
+                    );
+                    last_error = Some(anyhow!("HTTP {}", status));
                 }
                 Err(e) => {
-                    warn!("FlareClient: direct GET failed for {}: {:#}", url, e);
+                    // Transport errors (DNS block, connection reset, ...) can
+                    // be direct-path-only; the proxy may still get through.
+                    if !has_fs {
+                        return Err(e);
+                    }
+                    warn!(
+                        "FlareClient: direct {} failed for {}, falling back to proxy: {:#}",
+                        method, url, e
+                    );
+                    last_error = Some(e);
                 }
             }
 
-            // --- Attempt 2: re-solve, then retry direct GET ---
-            if let Ok(true) = self.re_solve() {
-                debug!(
-                    "FlareClient: retrying direct GET after re-solve for {}",
-                    url
-                );
-                self.throttle();
-                match self.try_direct_get(url) {
-                    Ok(DirectResult::Success(text)) => {
-                        info!(
-                            "FlareClient: direct GET succeeded after re-solve for {}",
-                            url
-                        );
-                        return Ok(text);
+            match self.re_solve() {
+                Ok(true) => {
+                    debug!(
+                        "FlareClient: retrying direct {} after re-solve for {}",
+                        method, url
+                    );
+                    match direct_request(self, url) {
+                        Ok(DirectResult::Success(text)) => {
+                            debug!(
+                                "FlareClient: direct {} succeeded after re-solve for {}",
+                                method, url
+                            );
+                            return Ok(text);
+                        }
+                        Ok(DirectResult::Challenged(status)) => {
+                            warn!(
+                                "FlareClient: still challenged (HTTP {}) after re-solve for {} {}",
+                                status, method, url
+                            );
+                            last_error = Some(anyhow!("still challenged (HTTP {})", status));
+                        }
+                        Ok(DirectResult::HttpError(status)) => {
+                            if !should_escalate_status(status) {
+                                return Err(anyhow!(
+                                    "FlareClient: direct {} returned HTTP {} after re-solve for {}",
+                                    method,
+                                    status,
+                                    url
+                                ));
+                            }
+                            debug!(
+                                "FlareClient: direct {} returned HTTP {} after re-solve for {}, escalating",
+                                method, status, url
+                            );
+                            last_error = Some(anyhow!("HTTP {} after re-solve", status));
+                        }
+                        Err(e) => {
+                            warn!(
+                                "FlareClient: direct {} failed after re-solve for {}, falling back to proxy: {:#}",
+                                method, url, e
+                            );
+                            last_error = Some(e);
+                        }
                     }
-                    Ok(DirectResult::Challenged(status)) => {
-                        warn!(
-                            "FlareClient: still challenged (HTTP {}) after re-solve for {}",
-                            status, url
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "FlareClient: direct GET failed after re-solve for {}: {:#}",
-                            url, e
-                        );
-                    }
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    warn!(
+                        "FlareClient: re-solve failed after direct {} challenge for {}: {:#}",
+                        method, url, e
+                    );
                 }
             }
 
-            // Direct path exhausted — mark it as non-working so future
-            // requests skip straight to the proxy.
             if has_fs {
                 info!(
                     "FlareClient: direct path failed, switching to proxy-only for future requests"
                 );
-                let mut guard = self.inner.lock().unwrap();
-                guard.direct_works = false;
+                self.disable_direct_path();
             }
         }
 
-        // --- Proxy path (either first attempt or fallback) ---
-        let (fs_url_opt, session_id_opt) = {
-            let guard = self.inner.lock().unwrap();
-            (guard.flaresolverr_url.clone(), guard.session_id.clone())
+        let fs_url_opt = { self.lock_inner().flaresolverr_url.clone() };
+        let session_id_opt = match self.session_for_request() {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                warn!(
+                    "FlareClient: could not initialize a persistent session for {} {}, using a temporary FlareSolverr request: {:#}",
+                    method, url, error
+                );
+                None
+            }
         };
 
         if let Some(fs_url) = fs_url_opt {
-            debug!("FlareClient: proxy GET {}", url);
-            self.throttle();
-            match proxy_fetch_text(&fs_url, session_id_opt.as_deref(), url) {
+            debug!("FlareClient: proxying {} {} via FlareSolverr", method, url);
+            match self.proxy_with_session_retry(
+                &fs_url,
+                method,
+                url,
+                session_id_opt.as_deref(),
+                &proxy_request,
+            ) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
-                    warn!("FlareClient: proxy failed for {}: {:#}", url, e);
+                    warn!("FlareClient: proxy {} failed for {}: {:#}", method, url, e);
+                    last_error = Some(e);
                 }
             }
         }
 
-        Err(anyhow!("FlareClient: all attempts failed for {}", url))
+        let base = anyhow!("FlareClient: all {} attempts failed for {}", method, url);
+        Err(match last_error {
+            Some(e) => e.context(base.to_string()),
+            None => base,
+        })
     }
 
     /// Try a direct GET and classify the result.
     fn try_direct_get(&self, url: &str) -> Result<DirectResult> {
         let (default_headers, agent) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (guard.default_headers.clone(), guard.agent.clone())
         };
 
         let req = default_headers
             .iter()
             .fold(agent.get(url), |req, (k, v)| req.header(k, v));
-        let mut resp = req.call()?;
-        let status = resp.status().as_u16();
-        let body = resp.body_mut().read_to_string()?;
-
-        if looks_like_cf_challenge(status, &body) {
-            Ok(DirectResult::Challenged(status))
-        } else {
-            Ok(DirectResult::Success(body))
-        }
+        classify_direct_response(req.call()?)
     }
 
     pub fn get_text(&self, url: &str) -> Result<String> {
@@ -601,6 +1013,26 @@ impl FlareClient {
         self.fetch_bytes_inner(url, 0)
     }
 
+    /// One throttled image GET with the client's current agent and headers.
+    fn image_request(&self, url: &str) -> Result<HttpResponse, ureq::Error> {
+        let (default_headers, agent, origin_url) = {
+            let guard = self.lock_inner();
+            (
+                guard.default_headers.clone(),
+                guard.agent.clone(),
+                guard.origin_url.clone(),
+            )
+        };
+
+        self.throttle();
+        let mut req = agent.get(url);
+        for (k, v) in default_headers.iter() {
+            req = req.header(k, v);
+        }
+        req = build_image_get_with_referer(url, req, Some(&origin_url));
+        req.call()
+    }
+
     fn fetch_bytes_inner(&self, url: &str, depth: u8) -> Result<Bytes> {
         if depth > 2 {
             return Err(anyhow!(
@@ -609,182 +1041,45 @@ impl FlareClient {
             ));
         }
 
-        let (default_headers, agent) = {
-            let guard = self.inner.lock().unwrap();
-            (guard.default_headers.clone(), guard.agent.clone())
+        // A transport error or a block-shaped status (403/429/503) may just
+        // mean expired clearance cookies; re-solve once and retry.
+        let first = self.image_request(url);
+        let blocked = match &first {
+            Ok(resp) => should_escalate_status(resp.status().as_u16()),
+            Err(_) => true,
         };
 
-        self.throttle();
-        let mut req = agent.get(url);
-
-        for (k, v) in default_headers.iter() {
-            req = req.header(k, v);
-        }
-
-        req = build_image_get(url, req);
-
-        let resp_result = req.call();
-
-        // If direct image fetch fails with a challenge, try re-solving once
-        let mut resp = match resp_result {
-            Ok(r) => r,
-            Err(e) => {
-                // Check if re-solve might help (network-level 403)
-                if self.re_solve().unwrap_or(false) {
-                    debug!(
-                        "FlareClient: retrying image fetch after re-solve for {}",
-                        url
-                    );
-                    let (default_headers, agent) = {
-                        let guard = self.inner.lock().unwrap();
-                        (guard.default_headers.clone(), guard.agent.clone())
-                    };
-
-                    self.throttle();
-                    let mut retry_req = agent.get(url);
-                    for (k, v) in default_headers.iter() {
-                        retry_req = retry_req.header(k, v);
-                    }
-                    retry_req = build_image_get(url, retry_req);
-                    retry_req.call()?
-                } else {
-                    return Err(e.into());
-                }
-            }
+        let resp = if blocked && self.re_solve().unwrap_or(false) {
+            debug!(
+                "FlareClient: retrying image fetch after re-solve for {}",
+                url
+            );
+            self.image_request(url)?
+        } else {
+            first?
         };
 
-        let status = resp.status();
-        if status.as_u16() >= 400 {
-            return Err(anyhow!(
-                "Image fetch failed: HTTP {} for {}",
-                status.as_u16(),
-                url
-            ));
+        match parse_image_response(resp, url)? {
+            ImageResponse::Bytes(bytes) => Ok(bytes),
+            ImageResponse::Redirect(next_url) => self.fetch_bytes_inner(&next_url, depth + 1),
         }
-
-        let content_type = resp
-            .headers()
-            .get(CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-
-        if content_type.starts_with("text/html") {
-            let html = resp.body_mut().read_to_string()?;
-
-            if let Some(next) = extract_first_img_src(&html) {
-                let next_url = match Url::parse(url).ok().and_then(|base| base.join(&next).ok()) {
-                    Some(u) => u.to_string(),
-                    None => next,
-                };
-                return self.fetch_bytes_inner(&next_url, depth + 1);
-            }
-
-            return Err(anyhow!(
-                "Expected image bytes but got HTML and no <img src=...> found for {}",
-                url
-            ));
-        }
-
-        let data: Vec<u8> = resp
-            .body_mut()
-            .with_config()
-            .limit(LIMIT_BYTES)
-            .read_to_vec()?;
-        Ok(Bytes::from(data))
     }
 
-    /// Same direct-first strategy as fetch_text, but for POST with form data.
     pub fn post_form_text(&self, url: &str, form: &[(&str, &str)]) -> Result<String> {
-        let (should_try_direct, has_fs) = {
-            let guard = self.inner.lock().unwrap();
-            (guard.direct_works, guard.flaresolverr_url.is_some())
-        };
-
-        if should_try_direct {
-            // --- Attempt 1: direct POST ---
-            debug!("FlareClient: direct POST {}", url);
-            self.throttle();
-            match self.try_direct_post_form(url, form) {
-                Ok(DirectResult::Success(text)) => {
-                    debug!("FlareClient: direct POST succeeded for {}", url);
-                    return Ok(text);
-                }
-                Ok(DirectResult::Challenged(status)) => {
-                    info!(
-                        "FlareClient: direct POST got challenged (HTTP {}) for {}",
-                        status, url
-                    );
-                }
-                Err(e) => {
-                    warn!("FlareClient: direct POST failed for {}: {:#}", url, e);
-                }
-            }
-
-            // --- Attempt 2: re-solve, then retry direct POST ---
-            if let Ok(true) = self.re_solve() {
-                debug!(
-                    "FlareClient: retrying direct POST after re-solve for {}",
-                    url
-                );
-                self.throttle();
-                match self.try_direct_post_form(url, form) {
-                    Ok(DirectResult::Success(text)) => {
-                        info!(
-                            "FlareClient: direct POST succeeded after re-solve for {}",
-                            url
-                        );
-                        return Ok(text);
-                    }
-                    Ok(DirectResult::Challenged(status)) => {
-                        warn!(
-                            "FlareClient: still challenged (HTTP {}) after re-solve for POST {}",
-                            status, url
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "FlareClient: direct POST failed after re-solve for {}: {:#}",
-                            url, e
-                        );
-                    }
-                }
-            }
-
-            // Direct path exhausted
-            if has_fs {
-                info!(
-                    "FlareClient: direct POST path failed, switching to proxy-only for future requests"
-                );
-                let mut guard = self.inner.lock().unwrap();
-                guard.direct_works = false;
-            }
-        }
-
-        // --- Proxy path ---
-        let (fs_url_opt, session_id_opt) = {
-            let guard = self.inner.lock().unwrap();
-            (guard.flaresolverr_url.clone(), guard.session_id.clone())
-        };
-
-        if let Some(fs_url) = fs_url_opt {
-            debug!("FlareClient: proxy POST {}", url);
-            self.throttle();
-            match proxy_post_form(&fs_url, session_id_opt.as_deref(), url, form) {
-                Ok(body) => return Ok(body),
-                Err(e) => {
-                    warn!("FlareClient: proxy POST failed for {}: {:#}", url, e);
-                }
-            }
-        }
-
-        Err(anyhow!("FlareClient: all POST attempts failed for {}", url))
+        self.request_with_ladder(
+            "POST",
+            url,
+            |client, request_url| client.try_direct_post_form(request_url, form),
+            |fs_url, session_id, request_url| {
+                proxy_post_form(fs_url, session_id, request_url, form)
+            },
+        )
     }
 
     /// Try a direct POST with form data and classify the result.
     fn try_direct_post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<DirectResult> {
         let (default_headers, agent) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (guard.default_headers.clone(), guard.agent.clone())
         };
 
@@ -792,41 +1087,76 @@ impl FlareClient {
         for (k, v) in default_headers.iter() {
             req = req.header(k, v);
         }
-        let mut resp = req.send_form(form.iter().copied())?;
-        let status = resp.status().as_u16();
-        let body = resp.body_mut().read_to_string()?;
-
-        if looks_like_cf_challenge(status, &body) {
-            Ok(DirectResult::Challenged(status))
-        } else {
-            Ok(DirectResult::Success(body))
-        }
+        classify_direct_response(req.send_form(form.iter().copied())?)
     }
 
-    pub fn post_empty_text(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<String> {
-        self.throttle();
-
-        // Snapshot default headers and agent
+    fn try_direct_post_empty(
+        &self,
+        url: &str,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<DirectResult> {
         let (default_headers, agent) = {
-            let guard = self.inner.lock().unwrap();
+            let guard = self.lock_inner();
             (guard.default_headers.clone(), guard.agent.clone())
         };
 
         let mut req = agent.post(url);
-
-        // default_headers: Vec<(String, String)>
         for (k, v) in default_headers.iter() {
-            req = req.header(k, v); // &String → &str via Deref
+            req = req.header(k, v);
         }
-
-        // extra_headers: &[(&str, &str)]
         for (k, v) in extra_headers.iter() {
-            req = req.header(*k, *v); // &(&str) → &str
+            req = req.header(*k, *v);
         }
 
-        let mut resp = req.send_empty()?;
-        Ok(resp.body_mut().read_to_string()?)
+        classify_direct_response(req.send_empty()?)
     }
+
+    pub fn post_empty_text(&self, url: &str, extra_headers: &[(&str, &str)]) -> Result<String> {
+        // FlareSolverr's request.post proxy leg cannot carry these per-request
+        // headers, so they apply only to the direct request.
+        self.request_with_ladder(
+            "POST",
+            url,
+            |client, request_url| client.try_direct_post_empty(request_url, extra_headers),
+            |fs_url, session_id, request_url| proxy_post_empty(fs_url, session_id, request_url),
+        )
+    }
+}
+
+fn classify_direct_response(mut resp: HttpResponse) -> Result<DirectResult> {
+    let status = resp.status().as_u16();
+    let body = resp.body_mut().read_to_string()?;
+
+    if let Some(marker) = cf_challenge_marker(status, &body) {
+        debug!(
+            "FlareClient: HTTP {} ({} bytes) classified as challenge, marker: {}",
+            status,
+            body.len(),
+            marker
+        );
+        Ok(DirectResult::Challenged(status))
+    } else if status >= 400 {
+        debug!(
+            "FlareClient: HTTP {} ({} bytes) classified as http error",
+            status,
+            body.len()
+        );
+        Ok(DirectResult::HttpError(status))
+    } else {
+        debug!(
+            "FlareClient: HTTP {} ({} bytes) classified as success",
+            status,
+            body.len()
+        );
+        Ok(DirectResult::Success(body))
+    }
+}
+
+/// Statuses that WAF/CDN layers commonly use to block a client rather than
+/// answer the request; worth retrying through re-solve/proxy instead of
+/// failing immediately.
+fn should_escalate_status(status: u16) -> bool {
+    matches!(status, 403 | 429 | 503)
 }
 
 /// Result of a direct HTTP request classified by challenge detection.
@@ -835,6 +1165,8 @@ enum DirectResult {
     Success(String),
     /// Cloudflare challenge detected; carries the HTTP status code.
     Challenged(u16),
+    /// A non-challenge HTTP error response.
+    HttpError(u16),
 }
 
 fn proxy_fetch_text(fs_url: &str, session_id: Option<&str>, url: &str) -> Result<String> {
@@ -879,6 +1211,34 @@ fn proxy_post_form(
             "url": url,
             "maxTimeout": 60000,
             "postData": body,
+        }),
+    };
+
+    let mut resp = ureq::post(fs_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = resp.body_mut().read_to_string()?;
+    let body: FlareSolverrResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!("FlareSolverr error: {}", body.message));
+    }
+    Ok(body.solution.response)
+}
+
+fn proxy_post_empty(fs_url: &str, session_id: Option<&str>, url: &str) -> Result<String> {
+    let payload = match session_id {
+        Some(sid) => json!({
+            "cmd": "request.post",
+            "url": url,
+            "maxTimeout": 60000,
+            "session": sid,
+            "postData": "",
+        }),
+        None => json!({
+            "cmd": "request.post",
+            "url": url,
+            "maxTimeout": 60000,
+            "postData": "",
         }),
     };
 
@@ -942,12 +1302,24 @@ const IMAGE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8";
 
 fn build_image_get(
     url: &str,
-    mut req: ureq::RequestBuilder<WithoutBody>,
+    req: ureq::RequestBuilder<WithoutBody>,
 ) -> ureq::RequestBuilder<WithoutBody> {
-    // Build a referer from the target URL origin
-    let referer = Url::parse(url)
-        .ok()
-        .and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h)));
+    build_image_get_with_referer(url, req, None)
+}
+
+fn build_image_get_with_referer(
+    url: &str,
+    mut req: ureq::RequestBuilder<WithoutBody>,
+    referer: Option<&str>,
+) -> ureq::RequestBuilder<WithoutBody> {
+    let referer = referer
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            Url::parse(url)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| format!("{}://{}/", u.scheme(), h)))
+        });
 
     req = req.header("Accept", IMAGE_ACCEPT);
 
@@ -958,19 +1330,17 @@ fn build_image_get(
     req
 }
 
-fn bytes_fetch_impl<F>(do_get: &mut F, url: &str, depth: u8) -> anyhow::Result<Bytes>
-where
-    F: FnMut(&str) -> anyhow::Result<ureq::http::Response<ureq::Body>>,
-{
-    if depth > 2 {
-        return Err(anyhow!(
-            "Too many wrapper hops while fetching image: {}",
-            url
-        ));
-    }
+/// A parsed image response: either the image bytes, or the URL of the real
+/// image when the server answered with an HTML wrapper page.
+enum ImageResponse {
+    Bytes(Bytes),
+    Redirect(String),
+}
 
-    let mut resp = do_get(url)?;
-
+/// Validate status and content type, then read the body: image bytes pass
+/// through, HTML wrapper pages resolve to the first `<img src>` URL. Depth
+/// checks, recursion, and retry logic stay with the callers.
+fn parse_image_response(mut resp: HttpResponse, url: &str) -> Result<ImageResponse> {
     let status = resp.status();
     if status.as_u16() >= 400 {
         return Err(anyhow!(
@@ -994,7 +1364,7 @@ where
                 Some(u) => u.to_string(),
                 None => next,
             };
-            return bytes_fetch_impl(do_get, &next_url, depth + 1);
+            return Ok(ImageResponse::Redirect(next_url));
         }
 
         return Err(anyhow!(
@@ -1008,17 +1378,33 @@ where
         .with_config()
         .limit(LIMIT_BYTES)
         .read_to_vec()?;
-    Ok(Bytes::from(data))
+    Ok(ImageResponse::Bytes(Bytes::from(data)))
+}
+
+fn bytes_fetch_impl<F>(do_get: &mut F, url: &str, depth: u8) -> anyhow::Result<Bytes>
+where
+    F: FnMut(&str) -> anyhow::Result<ureq::http::Response<ureq::Body>>,
+{
+    if depth > 2 {
+        return Err(anyhow!(
+            "Too many wrapper hops while fetching image: {}",
+            url
+        ));
+    }
+
+    let resp = do_get(url)?;
+    match parse_image_response(resp, url)? {
+        ImageResponse::Bytes(bytes) => Ok(bytes),
+        ImageResponse::Redirect(next_url) => bytes_fetch_impl(do_get, &next_url, depth + 1),
+    }
 }
 
 // Tiny helper: pull the first <img ... src="..."> out of wrapper HTML.
 fn extract_first_img_src(html: &str) -> Option<String> {
-    // Look for: src="...".
-    let needle = "src=\"";
-    let start = html.find(needle)? + needle.len();
-    let rest = &html[start..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    let selector = Selector::parse("img[src]").ok()?;
+    Html::parse_document(html)
+        .select(&selector)
+        .find_map(|image| image.value().attr("src").map(str::to_string))
 }
 
 #[cfg(test)]
@@ -1026,6 +1412,7 @@ mod test {
     use super::*;
     use serde_json::json;
     use std::env;
+    use std::sync::{Mutex as StdMutex, OnceLock};
 
     // -----------------------------------------------------------------------
     // Helpers
@@ -1033,6 +1420,14 @@ mod test {
 
     fn flaresolverr_url() -> String {
         env::var("FLARESOLVERR_URL").unwrap_or_else(|_| "http://localhost:8191/v1".to_string())
+    }
+
+    fn env_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_TEST_GUARD: OnceLock<StdMutex<()>> = OnceLock::new();
+        ENV_TEST_GUARD
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn get_flaresolverr_response(url: &str, flaresolverr_url: &str) -> FlareSolverrResponse {
@@ -1188,7 +1583,11 @@ mod test {
 
     #[test]
     fn test_extract_img_src_picks_first() {
-        let html = r#"<img src="first.png"><img src="second.png">"#;
+        let html = r#"
+            <script src="not-an-image.js"></script>
+            <iframe src="not-an-image.html"></iframe>
+            <img src="first.png"><img src="second.png">
+        "#;
         assert_eq!(extract_first_img_src(html), Some("first.png".to_string()));
     }
 
@@ -1408,6 +1807,24 @@ mod test {
     }
 
     #[test]
+    fn test_direct_path_reenables_after_cooldown() {
+        let client = FlareClient::plain();
+        {
+            let mut guard = client.inner.lock().unwrap();
+            guard.direct_works = false;
+            guard.direct_disabled_until = Some(Instant::now() - Duration::from_secs(1));
+        }
+
+        let (should_try_direct, has_fs) = client.direct_path_state();
+
+        assert!(should_try_direct);
+        assert!(!has_fs);
+        let guard = client.inner.lock().unwrap();
+        assert!(guard.direct_works);
+        assert!(guard.direct_disabled_until.is_none());
+    }
+
+    #[test]
     fn test_plain_client_with_rps() {
         let client = FlareClient::plain_with_rps(Some(2.0));
         let guard = client.inner.lock().unwrap();
@@ -1448,6 +1865,7 @@ mod test {
 
     #[test]
     fn test_from_env_no_env_var_is_plain() {
+        let _guard = env_test_guard();
         // Ensure env var is not set for this test
         // SAFETY: Test-only; single-threaded test runner for env-dependent tests.
         unsafe { env::remove_var("FLARESOLVERR_URL") };
@@ -1459,10 +1877,57 @@ mod test {
 
     #[test]
     fn test_from_env_or_plain_no_env_var() {
+        let _guard = env_test_guard();
         unsafe { env::remove_var("FLARESOLVERR_URL") };
         let client = FlareClient::from_env_or_plain("https://example.com");
         let guard = client.inner.lock().unwrap();
         assert!(guard.flaresolverr_url.is_none());
+    }
+
+    #[test]
+    fn test_named_session_is_lazy_and_explicit_override_wins() {
+        let _guard = env_test_guard();
+        let previous_url = env::var("FLARESOLVERR_URL").ok();
+        let previous_session = env::var("FLARESOLVERR_SESSION").ok();
+
+        unsafe {
+            env::set_var("FLARESOLVERR_URL", "http://127.0.0.1:8191/v1");
+            env::remove_var("FLARESOLVERR_SESSION");
+        }
+
+        let client = FlareClient::from_env_with_rps_and_session(
+            "https://example.com",
+            None,
+            Some("tanoshi-example"),
+        )
+        .unwrap();
+        let guard = client.inner.lock().unwrap();
+        assert!(guard.session_id.is_none());
+        assert_eq!(guard.session_name.as_deref(), Some("tanoshi-example"));
+        drop(guard);
+
+        unsafe { env::set_var("FLARESOLVERR_SESSION", "user-supplied") };
+        let overridden = FlareClient::from_env_with_rps_and_session(
+            "https://example.com",
+            None,
+            Some("tanoshi-example"),
+        )
+        .unwrap();
+        let guard = overridden.inner.lock().unwrap();
+        assert_eq!(guard.session_id.as_deref(), Some("user-supplied"));
+        assert!(guard.session_name.is_none());
+        drop(guard);
+
+        unsafe {
+            match previous_url {
+                Some(value) => env::set_var("FLARESOLVERR_URL", value),
+                None => env::remove_var("FLARESOLVERR_URL"),
+            }
+            match previous_session {
+                Some(value) => env::set_var("FLARESOLVERR_SESSION", value),
+                None => env::remove_var("FLARESOLVERR_SESSION"),
+            }
+        }
     }
 
     // --- FlareClient::re_solve without FS ----------------------------------
@@ -1475,6 +1940,79 @@ mod test {
             !result,
             "re_solve should return Ok(false) when no FS configured"
         );
+    }
+
+    // --- HTTP status semantics ---------------------------------------------
+
+    /// Serve one HTTP response on a local port, return the URL to request.
+    fn serve_once(response: &'static str) -> String {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    const NOT_FOUND_RESPONSE: &str =
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: close\r\n\r\nnot found";
+
+    #[test]
+    fn test_rate_limited_agent_errors_on_http_status() {
+        // RateLimitedAgent keeps ureq's status-as-error default: callers
+        // parse response bodies unconditionally, so a 404 page must surface
+        // as Err instead of being parsed into empty results.
+        let url = serve_once(NOT_FOUND_RESPONSE);
+        let agent = build_rate_limited_ureq_agent(None, None);
+        assert!(
+            agent.get(&url).call().is_err(),
+            "non-2xx must be an error for RateLimitedAgent"
+        );
+    }
+
+    #[test]
+    fn test_flare_client_classifies_http_error() {
+        // FlareClient's lenient agent must receive non-2xx bodies so
+        // challenge classification can inspect them.
+        let url = serve_once(NOT_FOUND_RESPONSE);
+        let client = FlareClient::plain();
+        match client.try_direct_get(&url).unwrap() {
+            DirectResult::HttpError(status) => assert_eq!(status, 404),
+            DirectResult::Success(_) => panic!("404 should classify as HttpError, got Success"),
+            DirectResult::Challenged(_) => {
+                panic!("404 should classify as HttpError, got Challenged")
+            }
+        }
+    }
+
+    #[test]
+    fn test_fetch_text_propagates_http_error() {
+        // Without FlareSolverr there is nothing to escalate to: a plain 404
+        // must come back as an error naming the status, not a silent body.
+        let url = serve_once(NOT_FOUND_RESPONSE);
+        let client = FlareClient::plain();
+        let err = client.fetch_text(&url).unwrap_err();
+        assert!(
+            err.to_string().contains("404"),
+            "error should carry the HTTP status: {err:#}"
+        );
+    }
+
+    #[test]
+    fn test_should_escalate_status() {
+        assert!(should_escalate_status(403));
+        assert!(should_escalate_status(429));
+        assert!(should_escalate_status(503));
+        assert!(!should_escalate_status(404));
+        assert!(!should_escalate_status(500));
+        assert!(!should_escalate_status(200));
     }
 
     // --- RateLimitedAgent --------------------------------------------------
@@ -1568,6 +2106,7 @@ mod test {
         // Ensure the enum is constructable (compile-time check mostly)
         let success = DirectResult::Success("hello".to_string());
         let challenged = DirectResult::Challenged(403);
+        let http_error = DirectResult::HttpError(404);
 
         match success {
             DirectResult::Success(s) => assert_eq!(s, "hello"),
@@ -1578,12 +2117,18 @@ mod test {
             DirectResult::Challenged(code) => assert_eq!(code, 403),
             _ => panic!("Expected Challenged"),
         }
+
+        match http_error {
+            DirectResult::HttpError(code) => assert_eq!(code, 404),
+            _ => panic!("Expected HttpError"),
+        }
     }
 
     // --- build_rate_limited_flaresolverr_client without env -----------------
 
     #[test]
     fn test_build_rate_limited_flaresolverr_client_no_env() {
+        let _guard = env_test_guard();
         unsafe { env::remove_var("FLARESOLVERR_URL") };
         // Should fall back to plain client without panicking
         let client = build_rate_limited_flaresolverr_client("https://example.com", Some(3.0));
@@ -1636,6 +2181,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_nowsecure() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
 
         let flare_body = get_flaresolverr_response("https://nowsecure.com", &fs_url);
@@ -1651,6 +2197,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_openai() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
 
         let flare_body = get_flaresolverr_response("https://openai.com", &fs_url);
@@ -1663,25 +2210,25 @@ mod test {
 
     /// Integration: FlareClient direct-first strategy against a CF-protected site.
     /// Validates that:
-    ///   1. from_env solves initially and stores cookies/UA/headers
-    ///   2. fetch_text succeeds via the direct path (no per-request proxy)
+    ///   1. construction does not perform a solve
+    ///   2. fetch_text succeeds via the direct path or lazy solve
     ///   3. The returned HTML is the real page, not a challenge
     #[test]
     #[ignore]
     fn test_flare_client_direct_first_fetch() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         unsafe { env::set_var("FLARESOLVERR_URL", &fs_url) };
 
         let client = FlareClient::from_env("https://nowsecure.com").unwrap();
 
-        // Verify internal state was populated by the initial solve
+        // Verify construction only stored the configured request state.
         {
             let guard = client.inner.lock().unwrap();
             assert!(guard.flaresolverr_url.is_some());
             assert_eq!(guard.origin_url, "https://nowsecure.com");
-            // After a successful solve, we should have default_headers
-            // (may be empty if the site returns few headers, but agent
-            // should have cookies).
+            // No solve should have happened during construction.
+            assert!(guard.default_headers.is_empty());
         }
 
         let body = client.fetch_text("https://nowsecure.com").unwrap();
@@ -1711,7 +2258,9 @@ mod test {
     #[ignore]
     fn test_rate_limited_agent_fetch_bytes() {
         let agent = build_rate_limited_ureq_agent(None, Some(5.0));
-        let bytes = agent.fetch_bytes("https://httpbin.org/image/png").unwrap();
+        let bytes = agent
+            .fetch_bytes("https://httpbin.org/image/png", None)
+            .unwrap();
         assert!(!bytes.is_empty());
         assert_eq!(&bytes[0..4], &[0x89, 0x50, 0x4E, 0x47]);
     }
@@ -1720,6 +2269,7 @@ mod test {
     #[test]
     #[ignore]
     fn test_solve_with_flaresolverr_struct() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         let solved = solve_with_flaresolverr(&fs_url, "https://nowsecure.com", None).unwrap();
 
@@ -1770,10 +2320,11 @@ mod test {
         assert!(body.contains("X-Custom"));
     }
 
-    /// Integration: FlareClient with session support
+    /// Integration: FlareClient does not create a session by default
     #[test]
     #[ignore]
-    fn test_flare_client_session_creation() {
+    fn test_flare_client_session_not_created_by_default() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         unsafe { env::set_var("FLARESOLVERR_URL", &fs_url) };
         unsafe { env::remove_var("FLARESOLVERR_SESSION") };
@@ -1781,17 +2332,14 @@ mod test {
         let client = FlareClient::from_env("https://nowsecure.com").unwrap();
         let guard = client.inner.lock().unwrap();
 
-        // Session should have been auto-created
-        assert!(
-            guard.session_id.is_some(),
-            "Expected a session_id to be created automatically"
-        );
+        assert!(guard.session_id.is_none());
     }
 
     /// Integration: multiple sequential fetches reuse the same agent (direct path)
     #[test]
     #[ignore]
     fn test_flare_client_multiple_fetches_reuse_agent() {
+        let _guard = env_test_guard();
         let fs_url = flaresolverr_url();
         unsafe { env::set_var("FLARESOLVERR_URL", &fs_url) };
 

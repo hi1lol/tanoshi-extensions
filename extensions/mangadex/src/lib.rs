@@ -19,6 +19,12 @@ use tanoshi_lib::prelude::*;
 tanoshi_lib::export_plugin!(register);
 
 fn register(registrar: &mut dyn PluginRegistrar) {
+    networking::init_plugin_logging();
+    log::info!(
+        "Registering {} extension v{}",
+        NAME,
+        env!("CARGO_PKG_VERSION")
+    );
     registrar.register_function(Box::new(Mangadex::default()));
 }
 
@@ -31,6 +37,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const ID: i64 = 2;
 const NAME: &str = "Mangadex";
 const URL: &str = "https://api.mangadex.org";
+const SITE_URL: &str = "https://mangadex.org";
 // While api.mangadex.org has a rate limit of 5 requests per second
 // The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
 const REQUESTS_PER_SECOND: f64 = 5.0;
@@ -271,6 +278,7 @@ impl Extension for Mangadex {
     }
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+        log::debug!("{NAME}: get_popular_manga page={page}");
         let query = request::MangaList {
             order: Some(ListOrder {
                 followed_count: Some(Order::Desc),
@@ -282,6 +290,7 @@ impl Extension for Mangadex {
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+        log::debug!("{NAME}: get_latest_manga page={page}");
         self.get_manga_list(page, request::MangaList::default())
     }
 
@@ -291,6 +300,7 @@ impl Extension for Mangadex {
         query: Option<String>,
         filters: Option<Vec<Input>>,
     ) -> anyhow::Result<Vec<MangaInfo>> {
+        log::debug!("{NAME}: search_manga page={page} query={query:?}");
         let query_list = if let Some(filters) = filters {
             filters.into()
         } else if let Some(query) = query {
@@ -312,6 +322,7 @@ impl Extension for Mangadex {
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
+        log::debug!("{NAME}: get_manga_detail path={path}");
         let url = format!(
             "{}{}?includes[]=author&includes[]=artist&includes[]=cover_art",
             URL, path
@@ -327,6 +338,7 @@ impl Extension for Mangadex {
     }
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
+        log::debug!("{NAME}: get_chapters path={path}");
         let url = format!(
             "{}{}/feed?limit=500&contentRating[]=safe&contentRating[]=suggestive&contentRating[]=erotica&contentRating[]=pornographic&translatedLanguage[]=en&includes[]=scanlation_group",
             URL, path
@@ -342,6 +354,7 @@ impl Extension for Mangadex {
     }
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+        log::debug!("{NAME}: get_pages path={path}");
         let chapter_id = path.replace("/chapter/", "");
         let url = format!("{}/at-home/server/{}", URL, chapter_id);
         info!("URL = {:?}", url);
@@ -360,7 +373,8 @@ impl Extension for Mangadex {
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        self.client.fetch_bytes(&url)
+        log::debug!("{NAME}: get_image_bytes url={url}");
+        self.client.fetch_bytes(&url, Some(SITE_URL))
     }
 }
 

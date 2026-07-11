@@ -16,5 +16,10 @@ anyhow = "1.0.100"
 urlencoding = "2.1.3"
 once_cell = "1"
 log = { version = "0.4" }
-env_logger = { version = "0.11", default-features = false }
+# humantime gives log lines timestamps so they can be correlated with
+# FlareSolverr's own log output.
+env_logger = { version = "0.11", default-features = false, features = [
+    "humantime",
+] }
 bytes = "1"
+scraper = "0.24"

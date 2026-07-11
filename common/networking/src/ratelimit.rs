@@ -1,7 +1,7 @@
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use log::info;
+use log::trace;
 
 #[derive(Debug)]
 pub struct RateLimiter {
@@ -27,7 +27,6 @@ impl RateLimiter {
             let now = Instant::now();
             let sleep_for = {
                 let mut next = self.next_allowed.lock().unwrap();
-                info!("\nNow = {:?}\nNext = {:?}", now, next);
                 if now >= *next {
                     *next = now + self.interval;
                     None
@@ -37,10 +36,9 @@ impl RateLimiter {
             };
 
             if let Some(dur) = sleep_for {
-                info!("Sleeping for {:?}", dur);
+                trace!("Rate limiter sleeping for {:?}", dur);
                 std::thread::sleep(dur);
             } else {
-                info!("No sleep needed");
                 return;
             }
         }

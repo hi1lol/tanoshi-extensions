@@ -131,7 +131,7 @@ impl Extension for Manhwa18cc {
         let selector = Selector::parse(r#".read-content img"#)
             .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-        Ok(doc
+        let pages: Vec<String> = doc
             .select(&selector)
             .flat_map(|el| {
                 el.value()
@@ -139,7 +139,13 @@ impl Extension for Manhwa18cc {
                     .or_else(|| el.value().attr("src"))
             })
             .map(|p| p.to_string())
-            .collect())
+            .collect();
+
+        if pages.is_empty() {
+            return Err(anyhow!("parsed 0 items from {URL}{path} — markup change?"));
+        }
+
+        Ok(pages)
     }
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {

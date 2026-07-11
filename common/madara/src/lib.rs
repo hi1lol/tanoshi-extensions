@@ -258,16 +258,19 @@ pub fn get_manga_detail<C: DetailClient>(
     let selector_desc = Selector::parse("div.description-summary div.summary__content, div.summary_content div.post-content_item > h5 + div, div.summary_content div.manga-excerpt, div.summary-text p")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
+    let title = doc
+        .select(&selector_name)
+        .next()
+        .and_then(|item| item.last_child())
+        .and_then(|t| t.value().as_text())
+        .map(|text| text.trim())
+        .filter(|title| !title.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("no title found at {url}{path}"))?;
+
     Ok(MangaInfo {
         source_id,
-        title: doc
-            .select(&selector_name)
-            .next()
-            .and_then(|item| item.last_child())
-            .and_then(|t| t.value().as_text())
-            .unwrap()
-            .trim()
-            .to_string(),
+        title,
         author: doc
             .select(&selector_artist)
             .flat_map(|el| el.text())
@@ -504,4 +507,33 @@ pub fn get_pages(url: &str, path: &str, client: &FlareClient) -> Result<Vec<Stri
         .flat_map(|el| get_data_src(&el))
         .map(|p| p.trim().to_string())
         .collect())
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    struct StaticClient(&'static str);
+
+    impl DetailClient for StaticClient {
+        fn fetch_body(&self, _url: &str) -> anyhow::Result<String> {
+            Ok(self.0.to_string())
+        }
+    }
+
+    #[test]
+    fn get_manga_detail_missing_title_returns_error() {
+        let result = get_manga_detail(
+            "https://example.test",
+            "/missing",
+            1,
+            &StaticClient("<html><body>No title</body></html>"),
+        );
+
+        let error = result.expect_err("missing title should return an error");
+        assert_eq!(
+            error.to_string(),
+            "no title found at https://example.test/missing"
+        );
+    }
 }

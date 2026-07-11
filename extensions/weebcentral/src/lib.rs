@@ -101,7 +101,9 @@ fn get_manga_list(
     let manga_selector = Selector::parse("article.bg-base-300").unwrap();
     let title_selector = Selector::parse("div.text-ellipsis.truncate").unwrap();
     let author_selector = Selector::parse("div > span > a.link.link-info.link-hover").unwrap();
-    let genre_selector = Selector::parse("div.opacity-70 > span").unwrap();
+    let metadata_selector = Selector::parse("div.opacity-70").unwrap();
+    let metadata_label_selector = Selector::parse("strong").unwrap();
+    let metadata_value_selector = Selector::parse("span").unwrap();
     let status_selector = Selector::parse("strong + span").unwrap();
     let cover_selector = Selector::parse("picture img").unwrap();
     let url_selector = Selector::parse("a").unwrap();
@@ -118,13 +120,26 @@ fn get_manga_list(
         }
 
         let mut genres: Vec<String> = Vec::new();
-        let mut i = 0;
-        for genre in manga.select(&genre_selector) {
-            if i < 3 {
-                i += 1;
-                continue;
+        for section in manga.select(&metadata_selector) {
+            let is_tag_section = section
+                .select(&metadata_label_selector)
+                .next()
+                .map(|label| label.text().collect::<String>())
+                .is_some_and(|label| {
+                    matches!(
+                        label.trim().trim_end_matches(':'),
+                        "Tag(s)" | "Tags(s)" | "Genre(s)" | "Genres"
+                    )
+                });
+
+            if is_tag_section {
+                genres.extend(
+                    section
+                        .select(&metadata_value_selector)
+                        .map(|genre| genre.inner_html().trim().to_string()),
+                );
+                break;
             }
-            genres.push(genre.inner_html().trim().to_string());
         }
 
         let manga_url = manga.select(&url_selector).next().map_or_else(

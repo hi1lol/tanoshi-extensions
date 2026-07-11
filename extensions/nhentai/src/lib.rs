@@ -223,7 +223,7 @@ impl NHentai {
         (q, sort)
     }
 
-    fn get_manga_list(&self, url: &str) -> Result<Vec<MangaInfo>> {
+    fn get_manga_list(&self, url: &str, allow_empty: bool) -> Result<Vec<MangaInfo>> {
         let res = self
             .client
             .fetch_text(url)
@@ -273,6 +273,10 @@ impl NHentai {
                 cover_url,
             });
         }
+        if !allow_empty && !res.trim().is_empty() && manga_list.is_empty() {
+            return Err(anyhow!("parsed 0 items from {url} — markup change?"));
+        }
+
         Ok(manga_list)
     }
 }
@@ -310,14 +314,17 @@ impl Extension for NHentai {
         log::debug!("{NAME}: get_popular_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
-        self.get_manga_list(&format!("{URL}/search/?q={q}&sort=popular&page={page}"))
+        self.get_manga_list(
+            &format!("{URL}/search/?q={q}&sort=popular&page={page}"),
+            false,
+        )
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
-        self.get_manga_list(&format!("{URL}/search/?q={q}&page={page}"))
+        self.get_manga_list(&format!("{URL}/search/?q={q}&page={page}"), false)
     }
 
     fn search_manga(
@@ -340,7 +347,7 @@ impl Extension for NHentai {
         } else {
             return Err(anyhow!("query and filters cannot be both empty"));
         };
-        self.get_manga_list(&url)
+        self.get_manga_list(&url, true)
     }
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
@@ -549,6 +556,10 @@ impl Extension for NHentai {
                     &cap[1], &cap[2], &cap[3], &ext
                 ));
             }
+        }
+
+        if pages.is_empty() {
+            return Err(anyhow!("parsed 0 items from {url} — markup change?"));
         }
 
         Ok(pages)

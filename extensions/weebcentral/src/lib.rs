@@ -170,7 +170,13 @@ fn get_manga_list(
             cover_url,
         });
     }
-    if !allow_empty && !body.trim().is_empty() && manga_list.is_empty() {
+    // Past the end of pagination the site returns an explicit
+    // "No results found" alert fragment — a legitimate empty, not breakage.
+    if !allow_empty
+        && !body.trim().is_empty()
+        && manga_list.is_empty()
+        && !body.contains("No results found")
+    {
         return Err(anyhow::anyhow!(
             "parsed 0 items from {url} — markup change?"
         ));
@@ -456,6 +462,16 @@ mod test {
 
         let res = weebcentral.get_popular_manga(1).unwrap();
         assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_get_popular_manga_past_end_is_empty_not_error() {
+        // The site's "No results found" alert past the last page is a
+        // legitimate empty result, not a markup-change error.
+        let weebcentral = create_test_instance();
+
+        let res = weebcentral.get_popular_manga(99999).unwrap();
+        assert!(res.is_empty());
     }
 
     #[test]

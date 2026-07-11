@@ -273,7 +273,13 @@ impl NHentai {
                 cover_url,
             });
         }
-        if !allow_empty && !res.trim().is_empty() && manga_list.is_empty() {
+        // Past the end of pagination the site serves an explicit
+        // "No results found" page — a legitimate empty, not breakage.
+        if !allow_empty
+            && !res.trim().is_empty()
+            && manga_list.is_empty()
+            && !res.contains("No results found")
+        {
             return Err(anyhow!("parsed 0 items from {url} — markup change?"));
         }
 

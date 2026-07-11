@@ -1,9 +1,9 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use chrono::NaiveDateTime;
+use chrono::DateTime;
 use lazy_static::lazy_static;
 use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::env;
@@ -211,6 +211,18 @@ fn normalize_url(u: &str) -> String {
     } else {
         u.to_string()
     }
+}
+
+fn trimmed_element_text(element: ElementRef<'_>) -> Option<String> {
+    let text = element.text().collect::<String>();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn parse_uploaded_timestamp(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|datetime| datetime.timestamp())
 }
 
 fn build_gallery_page_urls(
@@ -535,36 +547,32 @@ impl Extension for NHentai {
         }
         let parodies = document
             .select(&parodies_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !parodies.is_empty() {
             description = format!("{}\nParodies: {}", description, parodies);
         }
         let characters = document
             .select(&characters_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !characters.is_empty() {
             description = format!("{}\nCharacters: {}", description, characters);
         }
         let languages = document
             .select(&languages_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !languages.is_empty() {
             description = format!("{}\nLanguages: {}", description, languages);
         }
         let categories = document
             .select(&categories_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !categories.is_empty() {
             description = format!("{}\nCategories: {}", description, categories);
@@ -588,21 +596,18 @@ impl Extension for NHentai {
 
         let title = document
             .select(&title_selector)
-            .flat_map(|el| el.text())
+            .filter_map(trimmed_element_text)
             .next()
-            .map(|s| s.to_string())
             .ok_or_else(|| anyhow!("title not found"))?;
 
         let author: Vec<String> = document
             .select(&author_selector)
-            .flat_map(|el| el.text())
-            .map(|s| s.to_string())
+            .filter_map(trimmed_element_text)
             .collect::<Vec<String>>();
 
         let genre: Vec<String> = document
             .select(&genre_selector)
-            .flat_map(|el| el.text())
-            .map(|s| s.to_string())
+            .filter_map(trimmed_element_text)
             .collect::<Vec<String>>();
 
         let manga = MangaInfo {
@@ -630,15 +635,13 @@ impl Extension for NHentai {
             .map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
         let scanlator = document
             .select(&scanlator_selector)
-            .flat_map(|el| el.text())
-            .next()
-            .map(|s| s.to_string());
+            .filter_map(trimmed_element_text)
+            .next();
         let uploaded = if let Some(uploaded) = document.select(&uploaded_selector).next() {
             uploaded
                 .value()
                 .attr("datetime")
-                .and_then(|t| NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f%z").ok())
-                .map(|dt| dt.and_utc().timestamp())
+                .and_then(parse_uploaded_timestamp)
         } else {
             None
         };
@@ -766,6 +769,26 @@ mod test {
     }
 
     #[test]
+    fn parse_nhentai_metadata_text_and_timestamp() {
+        let document = Html::parse_document(
+            r#"<span class="name"><span class="community"> </span> original </span>"#,
+        );
+        let selector = Selector::parse(".name").unwrap();
+
+        assert_eq!(
+            document
+                .select(&selector)
+                .next()
+                .and_then(trimmed_element_text),
+            Some("original".to_string())
+        );
+        assert_eq!(
+            parse_uploaded_timestamp("2018-03-20T11:24:45.000Z"),
+            Some(1_521_545_085)
+        );
+    }
+
+    #[test]
     fn parse_flaresolverr_wrapped_api_response() {
         let response: GalleryApiResponse = parse_api_response(
             r#"<html><body><pre>{"media_id":"123","pages":[{"path":"galleries/123/1.jpg"}]}</pre></body></html>"#,
@@ -840,6 +863,7 @@ mod test {
         let res = nhentai.get_manga_detail("/g/385965".to_string()).unwrap();
 
         assert_eq!(res.title, "Lady, Maid ni datsu");
+        assert!(res.genre.iter().all(|tag| !tag.trim().is_empty()));
     }
 
     #[test]
@@ -850,6 +874,7 @@ mod test {
 
         let res = nhentai.get_chapters("/g/385965".to_string()).unwrap();
         assert!(!res.is_empty());
+        assert!(res.iter().all(|chapter| chapter.uploaded > 0));
     }
 
     #[test]

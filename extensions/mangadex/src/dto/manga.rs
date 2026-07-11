@@ -117,6 +117,7 @@ pub enum Order {
 pub struct ListOrder {
     pub created_at: Option<Order>,
     pub updated_at: Option<Order>,
+    pub latest_uploaded_chapter: Option<Order>,
     pub followed_count: Option<Order>,
 }
 
@@ -485,7 +486,7 @@ pub mod request {
 mod test {
     use tanoshi_lib::prelude::Input;
 
-    use super::request::MangaList;
+    use super::{ListOrder, Order, request::MangaList};
 
     #[test]
     fn test_input_to_manga_list_request() {
@@ -541,5 +542,20 @@ mod test {
             query,
             "expected got {query}"
         );
+    }
+
+    #[test]
+    fn test_latest_uploaded_chapter_order_query() {
+        let query = MangaList {
+            order: Some(ListOrder {
+                latest_uploaded_chapter: Some(Order::Desc),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+        .to_query_string()
+        .unwrap();
+
+        assert!(query.contains("order[latestUploadedChapter]=desc"));
     }
 }

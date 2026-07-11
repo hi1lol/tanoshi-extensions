@@ -292,7 +292,16 @@ impl Extension for Mangadex {
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
-        self.get_manga_list(page, request::MangaList::default())
+        self.get_manga_list(
+            page,
+            request::MangaList {
+                order: Some(ListOrder {
+                    latest_uploaded_chapter: Some(Order::Desc),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
     }
 
     fn search_manga(

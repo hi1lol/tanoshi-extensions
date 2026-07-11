@@ -1,11 +1,14 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use chrono::NaiveDateTime;
-use fancy_regex::Regex;
+use chrono::DateTime;
 use lazy_static::lazy_static;
 use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
+use serde::{Deserialize, de::DeserializeOwned};
+use std::collections::VecDeque;
 use std::env;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tanoshi_lib::prelude::{
     ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar, SourceInfo,
 };
@@ -15,6 +18,9 @@ const ID: i64 = 6;
 const NAME: &str = "nhentai";
 const URL: &str = "https://nhentai.net";
 const REQUESTS_PER_SECOND: f64 = 10.0;
+const GALLERY_CACHE_CAPACITY: usize = 4;
+const GALLERY_CACHE_TTL: Duration = Duration::from_secs(15);
+const CDN_CONFIG_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 tanoshi_lib::export_plugin!(register);
 
@@ -89,9 +95,176 @@ lazy_static! {
     static ref PREFERENCES: Vec<Input> = vec![LANGUAGE_SELECT.clone(), BLACKLIST_TAG.clone()];
 }
 
+struct CachedGalleryPage {
+    url: String,
+    body: String,
+    fetched_at: Instant,
+}
+
+#[derive(Default)]
+struct GalleryPageCache {
+    entries: VecDeque<CachedGalleryPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GalleryApiResponse {
+    media_id: String,
+    pages: Vec<GalleryApiPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GalleryApiPage {
+    number: u32,
+    path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CdnConfigResponse {
+    image_servers: Vec<String>,
+}
+
+struct CachedCdnConfig {
+    image_servers: Vec<String>,
+    fetched_at: Instant,
+}
+
+#[derive(Default)]
+struct CdnConfigCache {
+    entry: Option<CachedCdnConfig>,
+}
+
+fn parse_api_response<T: DeserializeOwned>(body: &str, resource: &str) -> Result<T> {
+    let direct_error = match serde_json::from_str(body) {
+        Ok(response) => return Ok(response),
+        Err(error) => error,
+    };
+
+    let pre_selector = Selector::parse("pre")
+        .map_err(|error| anyhow!("failed to parse FlareSolverr response selector: {error:?}"))?;
+    let document = Html::parse_document(body);
+    let wrapped_body = document
+        .select(&pre_selector)
+        .next()
+        .map(|element| element.text().collect::<String>())
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!("failed to parse NHentai {resource} API response: {direct_error}")
+        })?;
+
+    serde_json::from_str(&wrapped_body)
+        .map_err(|error| anyhow!("failed to parse NHentai {resource} API response: {error}"))
+}
+
+impl CdnConfigCache {
+    fn get(&mut self) -> Option<Vec<String>> {
+        let entry = self.entry.as_ref()?;
+        if entry.fetched_at.elapsed() > CDN_CONFIG_CACHE_TTL {
+            self.entry = None;
+            return None;
+        }
+
+        Some(entry.image_servers.clone())
+    }
+
+    fn insert(&mut self, image_servers: Vec<String>) {
+        self.entry = Some(CachedCdnConfig {
+            image_servers,
+            fetched_at: Instant::now(),
+        });
+    }
+
+    fn promote(&mut self, image_server: &str) {
+        let Some(entry) = self.entry.as_mut() else {
+            return;
+        };
+        let Some(index) = entry
+            .image_servers
+            .iter()
+            .position(|server| server == image_server)
+        else {
+            return;
+        };
+        if index != 0 {
+            let server = entry.image_servers.remove(index);
+            entry.image_servers.insert(0, server);
+        }
+    }
+}
+
+fn normalize_cdn_servers(servers: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for server in servers {
+        let server = server.trim().trim_end_matches('/');
+        if !server.is_empty() && !normalized.iter().any(|known| known == server) {
+            normalized.push(server.to_string());
+        }
+    }
+    normalized
+}
+
+fn build_cdn_image_candidates(url: &str, image_servers: &[String]) -> Vec<(String, String)> {
+    let suffix = image_servers
+        .iter()
+        .filter_map(|server| {
+            let server = server.trim_end_matches('/');
+            let suffix = url.strip_prefix(server)?;
+            (suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('?'))
+                .then_some(suffix)
+        })
+        .next()
+        .or_else(|| url.find("/galleries/").map(|index| &url[index..]));
+
+    let Some(suffix) = suffix else {
+        return vec![(String::new(), url.to_string())];
+    };
+
+    let mut candidates = Vec::new();
+    for image_server in image_servers {
+        let image_server = image_server.trim_end_matches('/');
+        if image_server.is_empty() {
+            continue;
+        }
+        let candidate = format!("{image_server}{suffix}");
+        if !candidates.iter().any(|(_, known)| known == &candidate) {
+            candidates.push((image_server.to_string(), candidate));
+        }
+    }
+    if !candidates.iter().any(|(_, known)| known == url) {
+        candidates.push((String::new(), url.to_string()));
+    }
+    candidates
+}
+
+impl GalleryPageCache {
+    fn get(&mut self, url: &str) -> Option<String> {
+        let index = self.entries.iter().position(|entry| entry.url == url)?;
+        if self.entries[index].fetched_at.elapsed() > GALLERY_CACHE_TTL {
+            self.entries.remove(index);
+            return None;
+        }
+
+        let entry = self.entries.remove(index)?;
+        let body = entry.body.clone();
+        self.entries.push_front(entry);
+        Some(body)
+    }
+
+    fn insert(&mut self, url: String, body: String) {
+        self.entries.retain(|entry| entry.url != url);
+        self.entries.push_front(CachedGalleryPage {
+            url,
+            body,
+            fetched_at: Instant::now(),
+        });
+        self.entries.truncate(GALLERY_CACHE_CAPACITY);
+    }
+}
+
 pub struct NHentai {
     preferences: Vec<Input>,
     client: FlareClient,
+    gallery_cache: Mutex<GalleryPageCache>,
+    cdn_cache: Mutex<CdnConfigCache>,
 }
 
 impl Default for NHentai {
@@ -103,6 +276,8 @@ impl Default for NHentai {
                 Some(REQUESTS_PER_SECOND),
                 "nhentai",
             ),
+            gallery_cache: Mutex::new(GalleryPageCache::default()),
+            cdn_cache: Mutex::new(CdnConfigCache::default()),
         }
     }
 }
@@ -132,7 +307,128 @@ fn normalize_url(u: &str) -> String {
     }
 }
 
+fn trimmed_element_text(element: ElementRef<'_>) -> Option<String> {
+    let text = element.text().collect::<String>();
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
+fn parse_uploaded_timestamp(value: &str) -> Option<i64> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|datetime| datetime.timestamp())
+}
+
+fn build_gallery_page_urls(
+    gallery_id: &str,
+    gallery: &GalleryApiResponse,
+    image_server: &str,
+) -> Result<Vec<String>> {
+    if gallery.pages.is_empty() {
+        return Err(anyhow!(
+            "gallery {gallery_id} ({}) API response contains no pages",
+            gallery.media_id
+        ));
+    }
+
+    let image_server = image_server.trim_end_matches('/');
+    if image_server.is_empty() {
+        return Err(anyhow!("NHentai API returned an empty image server"));
+    }
+
+    let mut pages = gallery.pages.iter().collect::<Vec<_>>();
+    pages.sort_by_key(|page| page.number);
+
+    pages
+        .iter()
+        .map(|page| {
+            if page.path.trim().is_empty() {
+                return Err(anyhow!(
+                    "gallery {gallery_id} API response contains an empty page path"
+                ));
+            }
+            Ok(format!(
+                "{}/{}",
+                image_server,
+                page.path.trim_start_matches('/')
+            ))
+        })
+        .collect()
+}
+
 impl NHentai {
+    fn fetch_gallery(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", URL, path);
+        {
+            let mut cache = self
+                .gallery_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(body) = cache.get(&url) {
+                log::debug!("{NAME}: gallery cache hit url={url}");
+                return Ok(body);
+            }
+        }
+
+        let body = self
+            .client
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let mut cache = self
+            .gallery_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(url, body.clone());
+        Ok(body)
+    }
+
+    fn fetch_cdn_servers(&self) -> Result<Vec<String>> {
+        {
+            let mut cache = self
+                .cdn_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(image_servers) = cache.get() {
+                log::debug!("{NAME}: CDN config cache hit");
+                return Ok(image_servers);
+            }
+        }
+
+        let cdn_url = format!("{URL}/api/v2/cdn");
+        let cdn_res = self
+            .client
+            .fetch_text(&cdn_url)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let cdn: CdnConfigResponse = parse_api_response(&cdn_res, "CDN")?;
+        let image_servers = normalize_cdn_servers(cdn.image_servers);
+        if image_servers.is_empty() {
+            return Err(anyhow!("NHentai CDN API returned no image servers"));
+        }
+
+        let mut cache = self
+            .cdn_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(image_servers.clone());
+        Ok(image_servers)
+    }
+
+    fn promote_cdn_server(&self, image_server: &str) {
+        let mut cache = self
+            .cdn_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.promote(image_server);
+    }
+
+    fn invalidate_cdn_cache(&self) {
+        let mut cache = self
+            .cdn_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.entry = None;
+    }
+
     fn query_parts(&self, filters: Option<Vec<Input>>) -> (String, Option<String>) {
         let mut query: Vec<String> = vec![];
         let mut sort: Option<String> = None;
@@ -358,12 +654,7 @@ impl Extension for NHentai {
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
-        let url = format!("{}{}", URL, path);
-        // Send the request and get the response as a string
-        let res = self
-            .client
-            .fetch_text(&url)
-            .map_err(|e| anyhow!(e.to_string()))?;
+        let res = self.fetch_gallery(&path)?;
 
         let document = Html::parse_document(&res);
         let gallery_id_selector = Selector::parse("h3[id=\"gallery_id\"]")
@@ -399,36 +690,32 @@ impl Extension for NHentai {
         }
         let parodies = document
             .select(&parodies_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !parodies.is_empty() {
             description = format!("{}\nParodies: {}", description, parodies);
         }
         let characters = document
             .select(&characters_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !characters.is_empty() {
             description = format!("{}\nCharacters: {}", description, characters);
         }
         let languages = document
             .select(&languages_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !languages.is_empty() {
             description = format!("{}\nLanguages: {}", description, languages);
         }
         let categories = document
             .select(&categories_selector)
-            .into_iter()
-            .filter_map(|el| el.text().next())
-            .collect::<Vec<&str>>()
+            .filter_map(trimmed_element_text)
+            .collect::<Vec<String>>()
             .join(",");
         if !categories.is_empty() {
             description = format!("{}\nCategories: {}", description, categories);
@@ -452,21 +739,18 @@ impl Extension for NHentai {
 
         let title = document
             .select(&title_selector)
-            .flat_map(|el| el.text())
+            .filter_map(trimmed_element_text)
             .next()
-            .map(|s| s.to_string())
             .ok_or_else(|| anyhow!("title not found"))?;
 
         let author: Vec<String> = document
             .select(&author_selector)
-            .flat_map(|el| el.text())
-            .map(|s| s.to_string())
+            .filter_map(trimmed_element_text)
             .collect::<Vec<String>>();
 
         let genre: Vec<String> = document
             .select(&genre_selector)
-            .flat_map(|el| el.text())
-            .map(|s| s.to_string())
+            .filter_map(trimmed_element_text)
             .collect::<Vec<String>>();
 
         let manga = MangaInfo {
@@ -485,13 +769,7 @@ impl Extension for NHentai {
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
-        let url = format!("{}{}", URL, path);
-
-        // Send the request and get the response as a string
-        let res = self
-            .client
-            .fetch_text(&url)
-            .map_err(|e| anyhow!(e.to_string()))?;
+        let res = self.fetch_gallery(&path)?;
 
         let document = Html::parse_document(&res);
         let scanlator_selector = Selector::parse("a[href^=\"/group/\"] > .name")
@@ -500,15 +778,13 @@ impl Extension for NHentai {
             .map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
         let scanlator = document
             .select(&scanlator_selector)
-            .flat_map(|el| el.text())
-            .next()
-            .map(|s| s.to_string());
+            .filter_map(trimmed_element_text)
+            .next();
         let uploaded = if let Some(uploaded) = document.select(&uploaded_selector).next() {
             uploaded
                 .value()
                 .attr("datetime")
-                .and_then(|t| NaiveDateTime::parse_from_str(t, "%Y-%m-%dT%H:%M:%S%.f%z").ok())
-                .map(|dt| dt.and_utc().timestamp())
+                .and_then(parse_uploaded_timestamp)
         } else {
             None
         };
@@ -527,48 +803,24 @@ impl Extension for NHentai {
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
-        let url = format!("{}{}", URL, path);
-
-        let res = self
+        let gallery_id = path
+            .trim_matches('/')
+            .strip_prefix("g/")
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+            .ok_or_else(|| anyhow!("invalid NHentai gallery path: {path}"))?;
+        let api_url = format!("{URL}/api/v2/galleries/{gallery_id}");
+        let gallery_res = self
             .client
-            .fetch_text(&url)
+            .fetch_text(&api_url)
             .map_err(|e| anyhow!(e.to_string()))?;
+        let gallery: GalleryApiResponse = parse_api_response(&gallery_res, "gallery")?;
 
-        let document = Html::parse_document(&res);
-        let page_selector = Selector::parse(".thumb-container > .gallerythumb > img")
-            .map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
+        let image_servers = self.fetch_cdn_servers()?;
+        let image_server = image_servers
+            .first()
+            .ok_or_else(|| anyhow!("NHentai CDN API returned no image servers"))?;
 
-        let mut pages = vec![];
-        // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
-        let re = Regex::new(r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$")?;
-        for thumb in document.select(&page_selector) {
-            if let Some(orig) = thumb.value().attr("src") {
-                let url = normalize_url(orig);
-
-                let cap = re
-                    .captures(&url)?
-                    .ok_or_else(|| anyhow!("no captured regex for {url}"))?;
-
-                let mut ext = cap[4].to_string();
-                loop {
-                    match ext.split_once('.') {
-                        Some((a, b)) if a == b => ext = a.to_string(),
-                        _ => break,
-                    }
-                }
-
-                pages.push(format!(
-                    "https://i{}.nhentai.net/galleries/{}/{}.{}",
-                    &cap[1], &cap[2], &cap[3], &ext
-                ));
-            }
-        }
-
-        if pages.is_empty() {
-            return Err(anyhow!("parsed 0 items from {url} — markup change?"));
-        }
-
-        Ok(pages)
+        build_gallery_page_urls(gallery_id, &gallery, image_server)
     }
 
     fn headers(&self) -> std::collections::HashMap<String, String> {
@@ -581,7 +833,30 @@ impl Extension for NHentai {
 
     fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
         log::debug!("{NAME}: get_image_bytes url={url}");
-        self.client.fetch_bytes(&url)
+        let image_servers = self.fetch_cdn_servers().unwrap_or_else(|error| {
+            log::debug!("{NAME}: CDN mirror lookup failed, using original image URL: {error:#}");
+            Vec::new()
+        });
+        let candidates = build_cdn_image_candidates(&url, &image_servers);
+        let mut last_error = None;
+
+        for (image_server, candidate) in candidates {
+            match self.client.fetch_bytes(&candidate) {
+                Ok(bytes) => {
+                    if !image_server.is_empty() {
+                        self.promote_cdn_server(&image_server);
+                    }
+                    return Ok(bytes);
+                }
+                Err(error) => {
+                    log::debug!("{NAME}: CDN image candidate failed url={candidate}: {error:#}");
+                    last_error = Some(error);
+                }
+            }
+        }
+
+        self.invalidate_cdn_cache();
+        Err(last_error.unwrap_or_else(|| anyhow!("NHentai image URL list was empty")))
     }
 }
 
@@ -612,6 +887,138 @@ mod test {
         nhentai.set_preferences(preferences).unwrap();
 
         nhentai
+    }
+
+    #[test]
+    fn gallery_page_cache_keeps_multiple_recent_entries() {
+        let mut cache = GalleryPageCache::default();
+        cache.insert("https://nhentai.net/g/one".to_string(), "one".to_string());
+        cache.insert("https://nhentai.net/g/two".to_string(), "two".to_string());
+
+        assert_eq!(
+            cache.get("https://nhentai.net/g/one"),
+            Some("one".to_string())
+        );
+        assert_eq!(
+            cache.get("https://nhentai.net/g/two"),
+            Some("two".to_string())
+        );
+    }
+
+    #[test]
+    fn cdn_cache_reuses_and_promotes_mirrors() {
+        let mut cache = CdnConfigCache::default();
+        cache.insert(vec![
+            "https://i1.nhentai.net".to_string(),
+            "https://i2.nhentai.net".to_string(),
+        ]);
+
+        assert_eq!(
+            cache.get(),
+            Some(vec![
+                "https://i1.nhentai.net".to_string(),
+                "https://i2.nhentai.net".to_string(),
+            ])
+        );
+
+        cache.promote("https://i2.nhentai.net");
+        assert_eq!(
+            cache.get(),
+            Some(vec![
+                "https://i2.nhentai.net".to_string(),
+                "https://i1.nhentai.net".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn cdn_image_candidates_preserve_query_and_include_mirrors() {
+        let servers = vec![
+            "https://i1.nhentai.net".to_string(),
+            "https://i2.nhentai.net".to_string(),
+            "https://i3.nhentai.net".to_string(),
+        ];
+        let url = "https://i1.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net";
+
+        let candidates = build_cdn_image_candidates(url, &servers);
+
+        assert_eq!(
+            candidates[0],
+            ("https://i1.nhentai.net".to_string(), url.to_string())
+        );
+        assert_eq!(
+            candidates[1],
+            (
+                "https://i2.nhentai.net".to_string(),
+                "https://i2.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            candidates[2],
+            (
+                "https://i3.nhentai.net".to_string(),
+                "https://i3.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net"
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn gallery_api_page_numbers_sort_cdn_urls() {
+        let gallery = GalleryApiResponse {
+            media_id: "123".to_string(),
+            pages: vec![
+                GalleryApiPage {
+                    number: 2,
+                    path: "galleries/123/2.webp".to_string(),
+                },
+                GalleryApiPage {
+                    number: 1,
+                    path: "galleries/123/1.jpg".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            build_gallery_page_urls("456", &gallery, "https://i2.nhentai.net/").unwrap(),
+            vec![
+                "https://i2.nhentai.net/galleries/123/1.jpg",
+                "https://i2.nhentai.net/galleries/123/2.webp",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_nhentai_metadata_text_and_timestamp() {
+        let document = Html::parse_document(
+            r#"<span class="name"><span class="community"> </span> original </span>"#,
+        );
+        let selector = Selector::parse(".name").unwrap();
+
+        assert_eq!(
+            document
+                .select(&selector)
+                .next()
+                .and_then(trimmed_element_text),
+            Some("original".to_string())
+        );
+        assert_eq!(
+            parse_uploaded_timestamp("2018-03-20T11:24:45.000Z"),
+            Some(1_521_545_085)
+        );
+    }
+
+    #[test]
+    fn parse_flaresolverr_wrapped_api_response() {
+        let response: GalleryApiResponse = parse_api_response(
+            r#"<html><body><pre>{"media_id":"123","pages":[{"number":1,"path":"galleries/123/1.jpg"}]}</pre></body></html>"#,
+            "gallery",
+        )
+        .unwrap();
+
+        assert_eq!(response.media_id, "123");
+        assert_eq!(response.pages[0].path, "galleries/123/1.jpg");
     }
 
     #[test]
@@ -677,6 +1084,7 @@ mod test {
         let res = nhentai.get_manga_detail("/g/385965".to_string()).unwrap();
 
         assert_eq!(res.title, "Lady, Maid ni datsu");
+        assert!(res.genre.iter().all(|tag| !tag.trim().is_empty()));
     }
 
     #[test]
@@ -687,6 +1095,7 @@ mod test {
 
         let res = nhentai.get_chapters("/g/385965".to_string()).unwrap();
         assert!(!res.is_empty());
+        assert!(res.iter().all(|chapter| chapter.uploaded > 0));
     }
 
     #[test]
@@ -698,16 +1107,13 @@ mod test {
         let page = "/g/385965".to_string();
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
-        let re = Regex::new(r"https://i\d*.nhentai.net/galleries/2099700/1.jpg").unwrap();
-
-        assert!(re.is_match(&res[0]).unwrap());
+        assert!(res[0].starts_with("https://i"));
+        assert!(res[0].ends_with("/galleries/2099700/1.jpg"));
 
         let page = "/g/624576".to_string();
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
-        let re = Regex::new(r"https://i\d*.nhentai.net/galleries/3748415/2.webp").unwrap();
-        println!("re={:?}", re);
-        println!("res[1]={:?}", res[1]);
-        assert!(re.is_match(&res[1]).unwrap());
+        assert!(res[1].starts_with("https://i"));
+        assert!(res[1].ends_with("/galleries/3748415/2.webp"));
     }
 }

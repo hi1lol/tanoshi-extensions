@@ -1,6 +1,6 @@
 [package]
 name = "nhentai"
-version = "0.5.6"
+version = "0.5.7"
 edition = "2024"
 
 [lib]
@@ -11,7 +11,6 @@ networking = { path = "../../common/networking" }
 tanoshi-lib = { git = "https://github.com/luigi311/tanoshi", tag = "v0.38.0" }
 chrono = { version = "0.4", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
-fancy-regex = "0.16"
 scraper = "0.24"
 anyhow = "1"
 serde_json = "1"

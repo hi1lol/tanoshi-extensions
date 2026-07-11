@@ -1625,11 +1625,12 @@ dependencies = [
 
 [[package]]
 name = "weebcentral"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "bytes",
  "chrono",
+ "extension-utils",
  "lazy_static",
  "log",
  "networking",

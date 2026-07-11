@@ -4,22 +4,10 @@ use chrono::prelude::*;
 use lazy_static::lazy_static;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use scraper::{ElementRef, Html, Selector};
-use std::env;
-use tanoshi_lib::extensions::PluginRegistrar;
 use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, Lang, MangaInfo, SourceInfo};
 use urlencoding::encode;
 
-tanoshi_lib::export_plugin!(register);
-
-fn register(registrar: &mut dyn PluginRegistrar) {
-    networking::init_plugin_logging();
-    log::info!(
-        "Registering {} extension v{}",
-        NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    registrar.register_function(Box::new(Weebcentral::default()));
-}
+extension_utils::export_extension!(register, Weebcentral, NAME);
 
 lazy_static! {
     static ref PREFERENCES: Vec<Input> = vec![];
@@ -186,21 +174,7 @@ fn get_manga_list(
 }
 
 impl Extension for Weebcentral {
-    fn set_preferences(&mut self, preferences: Vec<Input>) -> Result<()> {
-        for input in preferences {
-            for pref in self.preferences.iter_mut() {
-                if input.eq(pref) {
-                    *pref = input.clone();
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn get_preferences(&self) -> Result<Vec<Input>> {
-        Ok(self.preferences.clone())
-    }
+    extension_utils::impl_preferences!(preferences);
 
     fn get_source_info(&self) -> tanoshi_lib::prelude::SourceInfo {
         SourceInfo {

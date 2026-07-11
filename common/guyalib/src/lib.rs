@@ -3,7 +3,6 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use networking::RateLimitedAgent;
-use serde_json;
 use tanoshi_lib::prelude::*;
 
 use crate::dto::{Detail, Series};

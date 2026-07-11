@@ -1,10 +1,10 @@
 [package]
 name = "extension-utils"
 version = "0.0.0"
-edition = "2024"
+edition.workspace = true
 
 [dependencies]
-anyhow = "1"
-log = "0.4"
-networking = { path = "../networking" }
-tanoshi-lib = { git = "https://github.com/luigi311/tanoshi", tag = "v0.38.0" }
+anyhow = { workspace = true }
+log = { workspace = true }
+networking = { workspace = true }
+tanoshi-lib = { workspace = true }

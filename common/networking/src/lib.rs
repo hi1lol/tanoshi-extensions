@@ -3,6 +3,7 @@ mod ratelimit;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
+use cookie_store as _;
 use log::{debug, info, warn};
 use ratelimit::RateLimiter;
 use scraper::{Html, Selector};

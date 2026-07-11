@@ -1,25 +1,28 @@
 [package]
 name = "networking"
 version = "0.0.0"
-edition = "2024"
+edition.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = { workspace = true }
+bytes = { workspace = true }
 cookie = "0.18"
-cookie_store = { version = "0.22" }
-ureq = { version = "3", features = ["json", "cookies"] }
-serde = { version = "1", features = ["derive"] }
-url = "2"
-serde_json = "1.0.145"
-anyhow = "1.0.100"
-urlencoding = "2.1.3"
-once_cell = "1"
-log = { version = "0.4" }
+# ureq disables cookie_store's public-suffix validation by default. Keep the
+# feature enabled explicitly so cookies cannot be accepted for public suffixes.
+cookie_store = { version = "0.22", default-features = false, features = [
+    "public_suffix",
+] }
 # humantime gives log lines timestamps so they can be correlated with
 # FlareSolverr's own log output.
 env_logger = { version = "0.11", default-features = false, features = [
     "humantime",
 ] }
-bytes = "1"
-scraper = "0.24"
+log = { workspace = true }
+scraper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ureq = { version = "3", features = ["json", "cookies"] }
+url = "2"
+urlencoding = { workspace = true }

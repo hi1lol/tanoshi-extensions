@@ -1,12 +1,13 @@
 [package]
 name = "mangadex"
-version = "0.5.5"
+version = "0.5.6"
 edition = "2024"
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
+extension-utils = { path = "../../common/extension-utils" }
 networking = { path = "../../common/networking" }
 tanoshi-lib = { git = "https://github.com/luigi311/tanoshi", tag = "v0.38.0" }
 chrono = { version = "0.4", features = ["serde"] }

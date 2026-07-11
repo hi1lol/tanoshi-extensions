@@ -39,6 +39,17 @@ pub fn parse_manga_list(
     selector: &Selector,
     is_selector_url: bool,
 ) -> Result<Vec<MangaInfo>> {
+    parse_manga_list_inner(url, source_id, body, selector, is_selector_url, false)
+}
+
+fn parse_manga_list_inner(
+    url: &str,
+    source_id: i64,
+    body: &str,
+    selector: &Selector,
+    is_selector_url: bool,
+    allow_empty: bool,
+) -> Result<Vec<MangaInfo>> {
     let doc = Html::parse_document(body);
 
     let selector_name = Selector::parse(if is_selector_url {
@@ -54,7 +65,7 @@ pub fn parse_manga_list(
     let selector_img =
         Selector::parse("img").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-    Ok(doc
+    let manga: Vec<MangaInfo> = doc
         .select(selector)
         .filter_map(|el| {
             let Some(title) = el
@@ -113,7 +124,13 @@ pub fn parse_manga_list(
                 cover_url,
             })
         })
-        .collect())
+        .collect();
+
+    if !allow_empty && !body.trim().is_empty() && manga.is_empty() {
+        return Err(anyhow!("parsed 0 items from {url} — markup change?"));
+    }
+
+    Ok(manga)
 }
 
 pub fn get_latest_manga(
@@ -193,7 +210,7 @@ pub fn search_manga_old(
     let selector =
         Selector::parse(".manga-item").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-    parse_manga_list(url, source_id, &body, &selector, false)
+    parse_manga_list_inner(url, source_id, &body, &selector, false, true)
 }
 
 pub fn search_manga(
@@ -229,7 +246,7 @@ pub fn search_manga(
             .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?
     };
 
-    parse_manga_list(url, source_id, &body, &selector, is_selector_url)
+    parse_manga_list_inner(url, source_id, &body, &selector, is_selector_url, true)
 }
 
 pub fn get_manga_detail<C: DetailClient>(
@@ -422,6 +439,10 @@ fn parse_chapters(
         })
         .collect();
 
+    if chapters.is_empty() {
+        return Err(anyhow!("parsed 0 items from {url} — markup change?"));
+    }
+
     Ok(chapters)
 }
 
@@ -510,11 +531,21 @@ pub fn get_pages(url: &str, path: &str, client: &FlareClient) -> Result<Vec<Stri
     )
     .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-    Ok(doc
+    let pages = doc
         .select(&selector)
         .flat_map(|el| get_data_src(&el))
         .map(|p| p.trim().to_string())
-        .collect())
+        .collect::<Vec<_>>();
+
+    if pages.is_empty() {
+        return Err(anyhow!(
+            "parsed 0 items from {}{} — markup change?",
+            url,
+            path
+        ));
+    }
+
+    Ok(pages)
 }
 
 #[cfg(test)]
@@ -575,5 +606,23 @@ mod test {
         .expect("badged title should parse");
 
         assert_eq!(result.title, "Private Tutoring");
+    }
+
+    #[test]
+    fn parse_manga_list_empty_markup_returns_error() {
+        let selector = Selector::parse(".card").unwrap();
+        let result = parse_manga_list(
+            "https://example.test",
+            1,
+            "<html><body>unexpected response</body></html>",
+            &selector,
+            false,
+        );
+
+        let error = result.expect_err("empty parsed list should return an error");
+        assert_eq!(
+            error.to_string(),
+            "parsed 0 items from https://example.test — markup change?"
+        );
     }
 }

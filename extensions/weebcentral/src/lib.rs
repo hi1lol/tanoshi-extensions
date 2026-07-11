@@ -86,6 +86,7 @@ fn get_manga_list(
     mut page: i64,
     suburl: &str,
     client: &RateLimitedAgent,
+    allow_empty: bool,
 ) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
     if page < 1 {
         page = 1;
@@ -169,6 +170,18 @@ fn get_manga_list(
             cover_url,
         });
     }
+    // Past the end of pagination the site returns an explicit
+    // "No results found" alert fragment — a legitimate empty, not breakage.
+    if !allow_empty
+        && !body.trim().is_empty()
+        && manga_list.is_empty()
+        && !body.contains("No results found")
+    {
+        return Err(anyhow::anyhow!(
+            "parsed 0 items from {url} — markup change?"
+        ));
+    }
+
     Ok(manga_list)
 }
 
@@ -207,6 +220,7 @@ impl Extension for Weebcentral {
             page,
             "/search/data?limit=32&author=&text=&sort=Popularity&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full%20Display&offset=",
             &self.client,
+            false,
         )
     }
 
@@ -216,6 +230,7 @@ impl Extension for Weebcentral {
             page,
             "/search/data?limit=32&sort=Latest+Updates&order=Descending&official=Any&anime=Any&adult=Any&display_mode=Full+Display&offset=",
             &self.client,
+            false,
         )
     }
 
@@ -234,6 +249,7 @@ impl Extension for Weebcentral {
                 encode(query.unwrap_or_default().as_str()).into_owned()
             ),
             &self.client,
+            true,
         )
     }
 
@@ -354,6 +370,12 @@ impl Extension for Weebcentral {
             });
         }
 
+        if chapters.is_empty() {
+            return Err(anyhow::anyhow!(
+                "parsed 0 items from {URL}{path}/full-chapter-list — markup change?"
+            ));
+        }
+
         Ok(chapters)
     }
 
@@ -376,6 +398,12 @@ impl Extension for Weebcentral {
 
         for panel in document.select(&panel_selector) {
             panels.push(panel.value().attr("src").unwrap_or("").to_string());
+        }
+
+        if panels.is_empty() {
+            return Err(anyhow::anyhow!(
+                "parsed 0 items from {URL}{path}/images — markup change?"
+            ));
         }
 
         Ok(panels)
@@ -434,6 +462,16 @@ mod test {
 
         let res = weebcentral.get_popular_manga(1).unwrap();
         assert!(!res.is_empty());
+    }
+
+    #[test]
+    fn test_get_popular_manga_past_end_is_empty_not_error() {
+        // The site's "No results found" alert past the last page is a
+        // legitimate empty result, not a markup-change error.
+        let weebcentral = create_test_instance();
+
+        let res = weebcentral.get_popular_manga(99999).unwrap();
+        assert!(res.is_empty());
     }
 
     #[test]

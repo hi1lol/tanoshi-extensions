@@ -241,8 +241,19 @@ impl Mangadex {
         // ureq v3: read JSON from the body
         let mut resp = self.client.get(&url).call()?;
         let res: Results = resp.body_mut().read_json()?;
-        if let dto::Data::Multiple { data, .. } = res.data {
-            Ok(data.into_iter().filter_map(map_result_to_manga).collect())
+        if let dto::Data::Multiple {
+            data,
+            offset: response_offset,
+            total,
+            ..
+        } = res.data
+        {
+            let raw_count = data.len();
+            let manga: Vec<MangaInfo> = data.into_iter().filter_map(map_result_to_manga).collect();
+            if manga.is_empty() && (raw_count > 0 || response_offset < total) {
+                bail!("parsed 0 items from {url} — markup change?");
+            }
+            Ok(manga)
         } else {
             bail!("invalid data");
         }
@@ -351,6 +362,8 @@ impl Extension for Mangadex {
         log::debug!("{NAME}: get_chapters path={path}");
         let mut offset = 0;
         let mut chapters = Vec::new();
+        let mut feed_has_results = false;
+        let mut saw_data = false;
 
         loop {
             let url = format!(
@@ -371,6 +384,8 @@ impl Extension for Mangadex {
             };
 
             let page_len = data.len() as i64;
+            saw_data |= page_len > 0;
+            feed_has_results |= total > 0;
             chapters.extend(data.into_iter().filter_map(map_result_to_chapter));
 
             let next_offset = response_offset + page_len;
@@ -381,6 +396,10 @@ impl Extension for Mangadex {
                 bail!("MangaDex chapter feed pagination did not advance");
             }
             offset = next_offset;
+        }
+
+        if chapters.is_empty() && (saw_data || feed_has_results) {
+            bail!("parsed 0 items from {URL}{path}/feed — markup change?");
         }
 
         Ok(chapters)
@@ -394,7 +413,12 @@ impl Extension for Mangadex {
 
         let mut resp = self.client_at_home.get(&url).call()?;
         let res: ResultsAtHome = resp.body_mut().read_json()?;
-        Ok(map_result_to_pages(res))
+        let pages = map_result_to_pages(res);
+        if pages.is_empty() {
+            bail!("parsed 0 items from {url} — markup change?");
+        }
+
+        Ok(pages)
     }
 
     fn headers(&self) -> std::collections::HashMap<String, String> {

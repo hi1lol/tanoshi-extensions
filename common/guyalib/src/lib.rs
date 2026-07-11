@@ -12,12 +12,23 @@ fn first_group_key(groups: &HashMap<String, Vec<String>>) -> Option<&str> {
     groups.keys().map(String::as_str).min()
 }
 
+fn ensure_non_empty<T>(body: &str, url: &str, items: Vec<T>) -> Result<Vec<T>> {
+    if !body.trim().is_empty() && items.is_empty() {
+        return Err(anyhow::anyhow!(
+            "parsed 0 items from {url} — markup change?"
+        ));
+    }
+
+    Ok(items)
+}
+
 pub fn get_manga_list(
     url: &str,
     source_id: i64,
     client: &RateLimitedAgent,
 ) -> Result<Vec<MangaInfo>> {
-    let mut resp = client.get(&format!("{}/api/get_all_series", url)).call()?;
+    let request_url = format!("{}/api/get_all_series", url);
+    let mut resp = client.get(&request_url).call()?;
     let text = resp.body_mut().read_to_string()?;
     let results: HashMap<String, Detail> = serde_json::from_str(&text)?;
 
@@ -36,7 +47,7 @@ pub fn get_manga_list(
         .collect();
 
     manga.sort_by(|a, b| a.title.cmp(&b.title));
-    Ok(manga)
+    ensure_non_empty(&text, &request_url, manga)
 }
 
 pub fn get_manga_detail(
@@ -67,7 +78,8 @@ pub fn get_chapters(
     source_id: i64,
     client: &RateLimitedAgent,
 ) -> Result<Vec<ChapterInfo>> {
-    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
+    let request_url = format!("{}{}", url, path);
+    let mut resp = client.get(&request_url).call()?;
     let text = resp.body_mut().read_to_string()?;
     let series: Series = serde_json::from_str(&text)?;
 
@@ -87,7 +99,7 @@ pub fn get_chapters(
         })
     }
 
-    Ok(chapters)
+    ensure_non_empty(&text, &request_url, chapters)
 }
 
 pub fn get_pages(url: &str, path: &str, client: &RateLimitedAgent) -> Result<Vec<String>> {

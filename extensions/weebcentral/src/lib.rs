@@ -83,8 +83,7 @@ fn get_manga_list(
 
     let mut manga_list = Vec::new();
     let url = format!("{}{}{}", URL, suburl, offset);
-    let mut resp = client.get(&url).call()?;
-    let body = resp.body_mut().read_to_string()?;
+    let body = client.fetch_text(&url)?;
     let document = Html::parse_document(&body);
 
     let manga_selector = Selector::parse("article.bg-base-300").unwrap();
@@ -229,8 +228,7 @@ impl Extension for Weebcentral {
 
     fn get_manga_detail(&self, path: String) -> Result<tanoshi_lib::prelude::MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
-        let mut resp = self.client.get(&format!("{URL}{path}")).call()?;
-        let body = resp.body_mut().read_to_string()?;
+        let body = self.client.fetch_text(&format!("{URL}{path}"))?;
 
         let manga = Html::parse_document(&body);
 
@@ -297,11 +295,9 @@ impl Extension for Weebcentral {
 
     fn get_chapters(&self, path: String) -> Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
-        let mut resp = self
+        let body = self
             .client
-            .get(&format!("{URL}{path}/full-chapter-list"))
-            .call()?;
-        let body = resp.body_mut().read_to_string()?;
+            .fetch_text(&format!("{URL}{path}/full-chapter-list"))?;
 
         let document = Html::parse_document(&body);
 
@@ -355,13 +351,9 @@ impl Extension for Weebcentral {
 
     fn get_pages(&self, path: String) -> Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
-        let mut resp = self
-            .client_pages
-            .get(&format!(
-                "{URL}{path}/images?is_prev=False&current_page=1&reading_style=single_page"
-            ))
-            .call()?;
-        let body = resp.body_mut().read_to_string()?;
+        let body = self.client_pages.fetch_text(&format!(
+            "{URL}{path}/images?is_prev=False&current_page=1&reading_style=single_page"
+        ))?;
 
         let document = Html::parse_document(&body);
 

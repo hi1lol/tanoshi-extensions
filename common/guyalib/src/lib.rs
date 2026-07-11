@@ -27,8 +27,7 @@ pub fn get_manga_list(
     client: &RateLimitedAgent,
 ) -> Result<Vec<MangaInfo>> {
     let request_url = format!("{}/api/get_all_series", url);
-    let mut resp = client.get(&request_url).call()?;
-    let text = resp.body_mut().read_to_string()?;
+    let text = client.fetch_text(&request_url)?;
     let results: HashMap<String, Detail> = serde_json::from_str(&text)?;
 
     let mut manga: Vec<MangaInfo> = results
@@ -55,8 +54,7 @@ pub fn get_manga_detail(
     source_id: i64,
     client: &RateLimitedAgent,
 ) -> Result<MangaInfo> {
-    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
-    let text = resp.body_mut().read_to_string()?;
+    let text = client.fetch_text(&format!("{}{}", url, path))?;
     let series: Series = serde_json::from_str(&text)?;
 
     Ok(MangaInfo {
@@ -78,8 +76,7 @@ pub fn get_chapters(
     client: &RateLimitedAgent,
 ) -> Result<Vec<ChapterInfo>> {
     let request_url = format!("{}{}", url, path);
-    let mut resp = client.get(&request_url).call()?;
-    let text = resp.body_mut().read_to_string()?;
+    let text = client.fetch_text(&request_url)?;
     let series: Series = serde_json::from_str(&text)?;
 
     let mut chapters = vec![];
@@ -107,8 +104,7 @@ pub fn get_pages(url: &str, path: &str, client: &RateLimitedAgent) -> Result<Vec
         .rsplit_once('/')
         .ok_or_else(|| anyhow::anyhow!("invalid Guya chapter path: {path}"))?;
 
-    let mut resp = client.get(&format!("{}{}", url, series_path)).call()?;
-    let text = resp.body_mut().read_to_string()?;
+    let text = client.fetch_text(&format!("{}{}", url, series_path))?;
     let series: Series = serde_json::from_str(&text)?;
 
     let chapter = series.chapters.get(chapter_number).ok_or_else(|| {

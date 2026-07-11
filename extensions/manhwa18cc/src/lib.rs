@@ -36,10 +36,7 @@ fn get_manga_list(
     orderby: &str,
     client: &RateLimitedAgent,
 ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
-    let mut res = client
-        .get(&format!("{URL}/webtoons/{page}?orderby={orderby}"))
-        .call()?;
-    let body = res.body_mut().read_to_string()?;
+    let body = client.fetch_text(&format!("{URL}/webtoons/{page}?orderby={orderby}"))?;
 
     let selector =
         Selector::parse(".manga-item").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -98,8 +95,7 @@ impl Extension for Manhwa18cc {
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
-        let mut res = self.client.get(&format!("{}{}", URL, path)).call()?;
-        let body = res.body_mut().read_to_string()?;
+        let body = self.client.fetch_text(&format!("{}{}", URL, path))?;
 
         let doc = Html::parse_document(&body);
 

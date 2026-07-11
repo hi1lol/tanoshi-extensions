@@ -6,12 +6,9 @@ use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extensi
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::VecDeque;
-use std::env;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tanoshi_lib::prelude::{
-    ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar, SourceInfo,
-};
+use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, SourceInfo};
 use urlencoding::encode;
 
 const ID: i64 = 6;
@@ -22,17 +19,7 @@ const GALLERY_CACHE_CAPACITY: usize = 4;
 const GALLERY_CACHE_TTL: Duration = Duration::from_secs(15);
 const CDN_CONFIG_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
-tanoshi_lib::export_plugin!(register);
-
-fn register(registrar: &mut dyn PluginRegistrar) {
-    networking::init_plugin_logging();
-    log::info!(
-        "Registering {} extension v{}",
-        NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    registrar.register_function(Box::new(NHentai::default()));
-}
+extension_utils::export_extension!(register, NHentai, NAME);
 
 lazy_static! {
     static ref TAG_FILTER: Input = Input::Text {
@@ -584,21 +571,7 @@ impl NHentai {
 }
 
 impl Extension for NHentai {
-    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
-        for input in preferences {
-            for pref in self.preferences.iter_mut() {
-                if input.eq(pref) {
-                    *pref = input.clone();
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn get_preferences(&self) -> anyhow::Result<Vec<Input>> {
-        Ok(self.preferences.clone())
-    }
+    extension_utils::impl_preferences!(preferences);
 
     fn get_source_info(&self) -> SourceInfo {
         SourceInfo {

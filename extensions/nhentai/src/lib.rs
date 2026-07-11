@@ -5,7 +5,10 @@ use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
 use scraper::{Html, Selector};
+use std::collections::VecDeque;
 use std::env;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tanoshi_lib::prelude::{
     ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar, SourceInfo,
 };
@@ -15,6 +18,8 @@ const ID: i64 = 6;
 const NAME: &str = "nhentai";
 const URL: &str = "https://nhentai.net";
 const REQUESTS_PER_SECOND: f64 = 10.0;
+const GALLERY_CACHE_CAPACITY: usize = 4;
+const GALLERY_CACHE_TTL: Duration = Duration::from_secs(15);
 
 tanoshi_lib::export_plugin!(register);
 
@@ -89,9 +94,46 @@ lazy_static! {
     static ref PREFERENCES: Vec<Input> = vec![LANGUAGE_SELECT.clone(), BLACKLIST_TAG.clone()];
 }
 
+struct CachedGalleryPage {
+    url: String,
+    body: String,
+    fetched_at: Instant,
+}
+
+#[derive(Default)]
+struct GalleryPageCache {
+    entries: VecDeque<CachedGalleryPage>,
+}
+
+impl GalleryPageCache {
+    fn get(&mut self, url: &str) -> Option<String> {
+        let index = self.entries.iter().position(|entry| entry.url == url)?;
+        if self.entries[index].fetched_at.elapsed() > GALLERY_CACHE_TTL {
+            self.entries.remove(index);
+            return None;
+        }
+
+        let entry = self.entries.remove(index)?;
+        let body = entry.body.clone();
+        self.entries.push_front(entry);
+        Some(body)
+    }
+
+    fn insert(&mut self, url: String, body: String) {
+        self.entries.retain(|entry| entry.url != url);
+        self.entries.push_front(CachedGalleryPage {
+            url,
+            body,
+            fetched_at: Instant::now(),
+        });
+        self.entries.truncate(GALLERY_CACHE_CAPACITY);
+    }
+}
+
 pub struct NHentai {
     preferences: Vec<Input>,
     client: FlareClient,
+    gallery_cache: Mutex<GalleryPageCache>,
 }
 
 impl Default for NHentai {
@@ -103,6 +145,7 @@ impl Default for NHentai {
                 Some(REQUESTS_PER_SECOND),
                 "nhentai",
             ),
+            gallery_cache: Mutex::new(GalleryPageCache::default()),
         }
     }
 }
@@ -133,6 +176,31 @@ fn normalize_url(u: &str) -> String {
 }
 
 impl NHentai {
+    fn fetch_gallery(&self, path: &str) -> Result<String> {
+        let url = format!("{}{}", URL, path);
+        {
+            let mut cache = self
+                .gallery_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(body) = cache.get(&url) {
+                log::debug!("{NAME}: gallery cache hit url={url}");
+                return Ok(body);
+            }
+        }
+
+        let body = self
+            .client
+            .fetch_text(&url)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let mut cache = self
+            .gallery_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(url, body.clone());
+        Ok(body)
+    }
+
     fn query_parts(&self, filters: Option<Vec<Input>>) -> (String, Option<String>) {
         let mut query: Vec<String> = vec![];
         let mut sort: Option<String> = None;
@@ -358,12 +426,7 @@ impl Extension for NHentai {
 
     fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
-        let url = format!("{}{}", URL, path);
-        // Send the request and get the response as a string
-        let res = self
-            .client
-            .fetch_text(&url)
-            .map_err(|e| anyhow!(e.to_string()))?;
+        let res = self.fetch_gallery(&path)?;
 
         let document = Html::parse_document(&res);
         let gallery_id_selector = Selector::parse("h3[id=\"gallery_id\"]")
@@ -485,13 +548,7 @@ impl Extension for NHentai {
 
     fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
-        let url = format!("{}{}", URL, path);
-
-        // Send the request and get the response as a string
-        let res = self
-            .client
-            .fetch_text(&url)
-            .map_err(|e| anyhow!(e.to_string()))?;
+        let res = self.fetch_gallery(&path)?;
 
         let document = Html::parse_document(&res);
         let scanlator_selector = Selector::parse("a[href^=\"/group/\"] > .name")
@@ -529,10 +586,7 @@ impl Extension for NHentai {
         log::debug!("{NAME}: get_pages path={path}");
         let url = format!("{}{}", URL, path);
 
-        let res = self
-            .client
-            .fetch_text(&url)
-            .map_err(|e| anyhow!(e.to_string()))?;
+        let res = self.fetch_gallery(&path)?;
 
         let document = Html::parse_document(&res);
         let page_selector = Selector::parse(".thumb-container > .gallerythumb > img")
@@ -612,6 +666,22 @@ mod test {
         nhentai.set_preferences(preferences).unwrap();
 
         nhentai
+    }
+
+    #[test]
+    fn gallery_page_cache_keeps_multiple_recent_entries() {
+        let mut cache = GalleryPageCache::default();
+        cache.insert("https://nhentai.net/g/one".to_string(), "one".to_string());
+        cache.insert("https://nhentai.net/g/two".to_string(), "two".to_string());
+
+        assert_eq!(
+            cache.get("https://nhentai.net/g/one"),
+            Some("one".to_string())
+        );
+        assert_eq!(
+            cache.get("https://nhentai.net/g/two"),
+            Some("two".to_string())
+        );
     }
 
     #[test]

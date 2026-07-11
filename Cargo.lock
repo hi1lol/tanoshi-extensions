@@ -804,7 +804,6 @@ dependencies = [
  "anyhow",
  "bytes",
  "chrono",
- "fancy-regex",
  "lazy_static",
  "log",
  "networking",

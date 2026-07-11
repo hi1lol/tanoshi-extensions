@@ -1,10 +1,10 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use chrono::NaiveDateTime;
-use fancy_regex::Regex;
 use lazy_static::lazy_static;
 use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
 use scraper::{Html, Selector};
+use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::VecDeque;
 use std::env;
 use std::sync::Mutex;
@@ -105,6 +105,44 @@ struct GalleryPageCache {
     entries: VecDeque<CachedGalleryPage>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GalleryApiResponse {
+    media_id: String,
+    pages: Vec<GalleryApiPage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GalleryApiPage {
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct CdnConfigResponse {
+    image_servers: Vec<String>,
+}
+
+fn parse_api_response<T: DeserializeOwned>(body: &str, resource: &str) -> Result<T> {
+    let direct_error = match serde_json::from_str(body) {
+        Ok(response) => return Ok(response),
+        Err(error) => error,
+    };
+
+    let pre_selector = Selector::parse("pre")
+        .map_err(|error| anyhow!("failed to parse FlareSolverr response selector: {error:?}"))?;
+    let document = Html::parse_document(body);
+    let wrapped_body = document
+        .select(&pre_selector)
+        .next()
+        .map(|element| element.text().collect::<String>())
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| {
+            anyhow!("failed to parse NHentai {resource} API response: {direct_error}")
+        })?;
+
+    serde_json::from_str(&wrapped_body)
+        .map_err(|error| anyhow!("failed to parse NHentai {resource} API response: {error}"))
+}
+
 impl GalleryPageCache {
     fn get(&mut self, url: &str) -> Option<String> {
         let index = self.entries.iter().position(|entry| entry.url == url)?;
@@ -173,6 +211,41 @@ fn normalize_url(u: &str) -> String {
     } else {
         u.to_string()
     }
+}
+
+fn build_gallery_page_urls(
+    gallery_id: &str,
+    gallery: &GalleryApiResponse,
+    image_server: &str,
+) -> Result<Vec<String>> {
+    if gallery.pages.is_empty() {
+        return Err(anyhow!(
+            "gallery {gallery_id} ({}) API response contains no pages",
+            gallery.media_id
+        ));
+    }
+
+    let image_server = image_server.trim_end_matches('/');
+    if image_server.is_empty() {
+        return Err(anyhow!("NHentai API returned an empty image server"));
+    }
+
+    gallery
+        .pages
+        .iter()
+        .map(|page| {
+            if page.path.trim().is_empty() {
+                return Err(anyhow!(
+                    "gallery {gallery_id} API response contains an empty page path"
+                ));
+            }
+            Ok(format!(
+                "{}/{}",
+                image_server,
+                page.path.trim_start_matches('/')
+            ))
+        })
+        .collect()
 }
 
 impl NHentai {
@@ -584,45 +657,30 @@ impl Extension for NHentai {
 
     fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
-        let url = format!("{}{}", URL, path);
+        let gallery_id = path
+            .trim_matches('/')
+            .strip_prefix("g/")
+            .filter(|id| !id.is_empty() && !id.contains('/'))
+            .ok_or_else(|| anyhow!("invalid NHentai gallery path: {path}"))?;
+        let api_url = format!("{URL}/api/v2/galleries/{gallery_id}");
+        let gallery_res = self
+            .client
+            .fetch_text(&api_url)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let gallery: GalleryApiResponse = parse_api_response(&gallery_res, "gallery")?;
 
-        let res = self.fetch_gallery(&path)?;
+        let cdn_url = format!("{URL}/api/v2/cdn");
+        let cdn_res = self
+            .client
+            .fetch_text(&cdn_url)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let cdn: CdnConfigResponse = parse_api_response(&cdn_res, "CDN")?;
+        let image_server = cdn
+            .image_servers
+            .first()
+            .ok_or_else(|| anyhow!("NHentai CDN API returned no image servers"))?;
 
-        let document = Html::parse_document(&res);
-        let page_selector = Selector::parse(".thumb-container > .gallerythumb > img")
-            .map_err(|e| anyhow!("failed to parse selector: {e:?}"))?;
-
-        let mut pages = vec![];
-        // t<n>.nhentai.net/galleries/<gallery>/<page>t.<ext>
-        let re = Regex::new(r"^https?://t(\d+)\..+/(\d+)/(\d+)t\.(\w+(?:\.\w+)?)(?:[?#].*)?$")?;
-        for thumb in document.select(&page_selector) {
-            if let Some(orig) = thumb.value().attr("src") {
-                let url = normalize_url(orig);
-
-                let cap = re
-                    .captures(&url)?
-                    .ok_or_else(|| anyhow!("no captured regex for {url}"))?;
-
-                let mut ext = cap[4].to_string();
-                loop {
-                    match ext.split_once('.') {
-                        Some((a, b)) if a == b => ext = a.to_string(),
-                        _ => break,
-                    }
-                }
-
-                pages.push(format!(
-                    "https://i{}.nhentai.net/galleries/{}/{}.{}",
-                    &cap[1], &cap[2], &cap[3], &ext
-                ));
-            }
-        }
-
-        if pages.is_empty() {
-            return Err(anyhow!("parsed 0 items from {url} — markup change?"));
-        }
-
-        Ok(pages)
+        build_gallery_page_urls(gallery_id, &gallery, image_server)
     }
 
     fn headers(&self) -> std::collections::HashMap<String, String> {
@@ -682,6 +740,41 @@ mod test {
             cache.get("https://nhentai.net/g/two"),
             Some("two".to_string())
         );
+    }
+
+    #[test]
+    fn gallery_api_page_paths_build_cdn_urls() {
+        let gallery = GalleryApiResponse {
+            media_id: "123".to_string(),
+            pages: vec![
+                GalleryApiPage {
+                    path: "galleries/123/1.jpg".to_string(),
+                },
+                GalleryApiPage {
+                    path: "galleries/123/2.webp".to_string(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            build_gallery_page_urls("456", &gallery, "https://i2.nhentai.net/").unwrap(),
+            vec![
+                "https://i2.nhentai.net/galleries/123/1.jpg",
+                "https://i2.nhentai.net/galleries/123/2.webp",
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_flaresolverr_wrapped_api_response() {
+        let response: GalleryApiResponse = parse_api_response(
+            r#"<html><body><pre>{"media_id":"123","pages":[{"path":"galleries/123/1.jpg"}]}</pre></body></html>"#,
+            "gallery",
+        )
+        .unwrap();
+
+        assert_eq!(response.media_id, "123");
+        assert_eq!(response.pages[0].path, "galleries/123/1.jpg");
     }
 
     #[test]
@@ -768,16 +861,13 @@ mod test {
         let page = "/g/385965".to_string();
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
-        let re = Regex::new(r"https://i\d*.nhentai.net/galleries/2099700/1.jpg").unwrap();
-
-        assert!(re.is_match(&res[0]).unwrap());
+        assert!(res[0].starts_with("https://i"));
+        assert!(res[0].ends_with("/galleries/2099700/1.jpg"));
 
         let page = "/g/624576".to_string();
         let res = nhentai.get_pages(page).unwrap();
         assert!(!res.is_empty());
-        let re = Regex::new(r"https://i\d*.nhentai.net/galleries/3748415/2.webp").unwrap();
-        println!("re={:?}", re);
-        println!("res[1]={:?}", res[1]);
-        assert!(re.is_match(&res[1]).unwrap());
+        assert!(res[1].starts_with("https://i"));
+        assert!(res[1].ends_with("/galleries/3748415/2.webp"));
     }
 }

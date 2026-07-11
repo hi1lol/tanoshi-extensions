@@ -498,7 +498,7 @@ pub fn get_pages(url: &str, path: &str, client: &FlareClient) -> Result<Vec<Stri
     let doc = Html::parse_document(&body);
 
     let selector = Selector::parse(
-        r#"div.page-break, li.blocks-gallery-item, reading-content, div.theimage, img"#,
+        r#"div.page-break img, li.blocks-gallery-item img, .reading-content img, div.theimage img"#,
     )
     .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 

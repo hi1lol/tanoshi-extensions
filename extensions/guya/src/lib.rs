@@ -2,25 +2,14 @@ use bytes::Bytes;
 use guyalib::{get_chapters, get_manga_detail, get_manga_list, get_pages};
 use lazy_static::lazy_static;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
-use std::env;
-use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar};
+use tanoshi_lib::prelude::{Extension, Input, Lang};
 
 const ID: i64 = 7;
 const NAME: &str = "Guya";
 const URL: &str = "https://guya.cubari.moe";
 const REQUESTS_PER_SECOND: f64 = 10.0;
 
-tanoshi_lib::export_plugin!(register);
-
-fn register(registrar: &mut dyn PluginRegistrar) {
-    networking::init_plugin_logging();
-    log::info!(
-        "Registering {} extension v{}",
-        NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    registrar.register_function(Box::new(Guya::default()));
-}
+extension_utils::export_extension!(register, Guya, NAME);
 
 lazy_static! {
     static ref PREFERENCES: Vec<Input> = vec![];
@@ -41,21 +30,7 @@ impl Default for Guya {
 }
 
 impl Extension for Guya {
-    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
-        for input in preferences {
-            for pref in self.preferences.iter_mut() {
-                if input.eq(pref) {
-                    *pref = input.clone();
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn get_preferences(&self) -> anyhow::Result<Vec<Input>> {
-        Ok(self.preferences.clone())
-    }
+    extension_utils::impl_preferences!(preferences);
 
     fn get_source_info(&self) -> tanoshi_lib::prelude::SourceInfo {
         tanoshi_lib::prelude::SourceInfo {

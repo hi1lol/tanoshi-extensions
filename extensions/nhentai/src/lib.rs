@@ -3,7 +3,7 @@ use bytes::Bytes;
 use chrono::NaiveDateTime;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use networking::{FlareClient, build_rate_limited_flaresolverr_client};
+use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
 use scraper::{Html, Selector};
 use std::env;
 use tanoshi_lib::prelude::{
@@ -98,7 +98,11 @@ impl Default for NHentai {
     fn default() -> Self {
         Self {
             preferences: PREFERENCES.clone(),
-            client: build_rate_limited_flaresolverr_client(URL, Some(REQUESTS_PER_SECOND)),
+            client: build_rate_limited_flaresolverr_client_for_extension(
+                URL,
+                Some(REQUESTS_PER_SECOND),
+                "nhentai",
+            ),
         }
     }
 }

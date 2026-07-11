@@ -24,6 +24,11 @@ pub type HttpResponse = ureq::http::Response<ureq::Body>;
 const LIMIT_BYTES: u64 = 50 * 1024 * 1024; // 50 MiB
 const DIRECT_RETRY_COOLDOWN: Duration = Duration::from_secs(15 * 60);
 
+// Session discovery/creation is rare, but multiple extension instances can
+// race to initialize the same named session. Serialize that small critical
+// section so we do not issue duplicate sessions.create calls.
+static FLARESOLVERR_SESSION_INIT_LOCK: Mutex<()> = Mutex::new(());
+
 /// User agent for FlareClient agents before the first FlareSolverr solve
 /// replaces them with the solved browser's UA. Sites that block default
 /// library user agents outright would otherwise 403 every first contact.
@@ -259,6 +264,19 @@ pub fn build_rate_limited_flaresolverr_client(
         .unwrap_or_else(|_| FlareClient::plain_with_rps(requests_per_second))
 }
 
+/// Build a FlareClient with a persistent, extension-scoped FlareSolverr
+/// session. The session is discovered/created lazily on the first request
+/// that needs FlareSolverr, then reused by subsequent requests.
+pub fn build_rate_limited_flaresolverr_client_for_extension(
+    origin_url: &str,
+    requests_per_second: Option<f64>,
+    extension_name: &str,
+) -> FlareClient {
+    let session_name = format!("tanoshi-{extension_name}");
+    FlareClient::from_env_with_rps_and_session(origin_url, requests_per_second, Some(&session_name))
+        .unwrap_or_else(|_| FlareClient::plain_with_rps(requests_per_second))
+}
+
 fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolverrCookie>) {
     let mut jar = agent.cookie_jar_lock();
     for c in cookies {
@@ -342,6 +360,68 @@ pub fn build_flaresolverr_client(
     Ok(agent)
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct FlareSolverrSessionListResponse {
+    status: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    sessions: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct FlareSolverrSessionCreateResponse {
+    status: String,
+    #[serde(default)]
+    message: String,
+    session: Option<String>,
+}
+
+fn list_flaresolverr_sessions(flaresolverr_url: &str) -> Result<Vec<String>> {
+    let payload = json!({"cmd": "sessions.list"});
+    let mut response = ureq::post(flaresolverr_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = response.body_mut().read_to_string()?;
+    let body: FlareSolverrSessionListResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!(
+            "FlareSolverr sessions.list failed: {}",
+            body.message
+        ));
+    }
+    Ok(body.sessions)
+}
+
+fn create_flaresolverr_session(flaresolverr_url: &str, session_name: &str) -> Result<String> {
+    let payload = json!({
+        "cmd": "sessions.create",
+        "session": session_name,
+    });
+    let mut response = ureq::post(flaresolverr_url)
+        .header("Content-Type", "application/json")
+        .send_json(&payload)?;
+    let text = response.body_mut().read_to_string()?;
+    let body: FlareSolverrSessionCreateResponse = serde_json::from_str(&text)?;
+    if body.status != "ok" {
+        return Err(anyhow!(
+            "FlareSolverr sessions.create failed: {}",
+            body.message
+        ));
+    }
+    body.session.ok_or_else(|| {
+        anyhow!("FlareSolverr sessions.create succeeded without returning a session ID")
+    })
+}
+
+fn is_missing_flaresolverr_session(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("session")
+        && (message.contains("not found")
+            || message.contains("does not exist")
+            || message.contains("invalid"))
+}
+
 /// Internal, mutable state wrapped by a Mutex.
 #[derive(Clone)]
 struct Inner {
@@ -349,6 +429,9 @@ struct Inner {
     origin_url: String,
     flaresolverr_url: Option<String>,
     session_id: Option<String>,
+    /// Named session to create/reuse when no explicit FLARESOLVERR_SESSION
+    /// override was provided.
+    session_name: Option<String>,
     default_headers: Vec<(String, String)>,
     limiter: Option<Arc<RateLimiter>>,
     /// Tracks whether direct requests work for this site.
@@ -428,27 +511,157 @@ impl FlareClient {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    fn session_for_request(&self) -> Result<Option<String>> {
+        let existing = { self.lock_inner().session_id.clone() };
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        self.ensure_named_session()
+    }
+
+    /// Resolve the configured named session exactly once per FlareClient.
+    /// Multiple clients use a process-wide lock so they can safely converge on
+    /// the same extension-scoped session without racing sessions.create.
+    fn ensure_named_session(&self) -> Result<Option<String>> {
+        let (flaresolverr_url, session_name, session_id) = {
+            let guard = self.lock_inner();
+            (
+                guard.flaresolverr_url.clone(),
+                guard.session_name.clone(),
+                guard.session_id.clone(),
+            )
+        };
+
+        if session_id.is_some() {
+            return Ok(session_id);
+        }
+        let (Some(flaresolverr_url), Some(session_name)) = (flaresolverr_url, session_name) else {
+            return Ok(None);
+        };
+
+        let _init_guard = FLARESOLVERR_SESSION_INIT_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        // Another FlareClient may have initialized this shared session while
+        // we waited for the process-wide lock.
+        {
+            let guard = self.lock_inner();
+            if guard.session_id.is_some() {
+                return Ok(guard.session_id.clone());
+            }
+        }
+
+        let session_id = if list_flaresolverr_sessions(&flaresolverr_url)?
+            .iter()
+            .any(|session| session == &session_name)
+        {
+            debug!(
+                "FlareClient: reusing existing FlareSolverr session {}",
+                session_name
+            );
+            session_name
+        } else {
+            info!(
+                "FlareClient: creating FlareSolverr session {}",
+                session_name
+            );
+            create_flaresolverr_session(&flaresolverr_url, &session_name)?
+        };
+
+        let mut guard = self.lock_inner();
+        if guard.session_id.is_none() {
+            guard.session_id = Some(session_id.clone());
+        }
+        Ok(guard.session_id.clone())
+    }
+
+    fn uses_named_session(&self) -> bool {
+        self.lock_inner().session_name.is_some()
+    }
+
+    fn clear_named_session(&self) {
+        let mut guard = self.lock_inner();
+        if guard.session_name.is_some() {
+            guard.session_id = None;
+        }
+    }
+
+    fn proxy_with_session_retry<P>(
+        &self,
+        flaresolverr_url: &str,
+        method: &str,
+        url: &str,
+        session_id: Option<&str>,
+        proxy_request: &P,
+    ) -> Result<String>
+    where
+        P: Fn(&str, Option<&str>, &str) -> Result<String>,
+    {
+        match proxy_request(flaresolverr_url, session_id, url) {
+            Ok(text) => Ok(text),
+            Err(error)
+                if session_id.is_some()
+                    && self.uses_named_session()
+                    && is_missing_flaresolverr_session(&error) =>
+            {
+                warn!(
+                    "FlareClient: session disappeared while proxying {} {}, refreshing it: {:#}",
+                    method, url, error
+                );
+                self.clear_named_session();
+                let refreshed_session = self.ensure_named_session()?.ok_or_else(|| {
+                    anyhow!(
+                        "FlareClient: named FlareSolverr session unavailable for {} {}",
+                        method,
+                        url
+                    )
+                })?;
+                proxy_request(flaresolverr_url, Some(&refreshed_session), url)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Re-solve via FlareSolverr and update the internal agent + headers.
     /// Returns Ok(true) if re-solve succeeded, Ok(false) if no FS configured.
     fn re_solve(&self) -> Result<bool> {
-        let (fs_url, origin_url, session_id) = {
+        let (fs_url, origin_url) = {
             let guard = self.lock_inner();
             match &guard.flaresolverr_url {
-                Some(url) => (
-                    url.clone(),
-                    guard.origin_url.clone(),
-                    guard.session_id.clone(),
-                ),
+                Some(url) => (url.clone(), guard.origin_url.clone()),
                 None => return Ok(false),
             }
         };
+        let session_id = self.session_for_request()?;
 
-        info!(
+        debug!(
             "FlareClient: re-solving challenge via FlareSolverr for {}",
             origin_url
         );
 
-        let solved = solve_with_flaresolverr(&fs_url, &origin_url, session_id.as_deref())?;
+        let solved = match solve_with_flaresolverr(&fs_url, &origin_url, session_id.as_deref()) {
+            Ok(solved) => solved,
+            Err(error)
+                if session_id.is_some()
+                    && self.uses_named_session()
+                    && is_missing_flaresolverr_session(&error) =>
+            {
+                warn!(
+                    "FlareClient: session disappeared while re-solving {}, refreshing it: {:#}",
+                    origin_url, error
+                );
+                self.clear_named_session();
+                let refreshed_session = self.ensure_named_session()?.ok_or_else(|| {
+                    anyhow!(
+                        "FlareClient: named FlareSolverr session unavailable for {}",
+                        origin_url
+                    )
+                })?;
+                solve_with_flaresolverr(&fs_url, &origin_url, Some(&refreshed_session))?
+            }
+            Err(error) => return Err(error),
+        };
         let new_agent = build_lenient_ureq_agent(Some(&solved.user_agent));
         insert_flaresolverr_cookies_into_agent(&new_agent, solved.cookies);
 
@@ -458,7 +671,7 @@ impl FlareClient {
             guard.default_headers = solved.headers;
         }
 
-        info!("FlareClient: re-solve succeeded, agent updated");
+        debug!("FlareClient: re-solve succeeded, agent updated");
         Ok(true)
     }
 
@@ -472,6 +685,7 @@ impl FlareClient {
                 origin_url: String::new(),
                 flaresolverr_url: None,
                 session_id: None,
+                session_name: None,
                 default_headers: vec![],
                 limiter,
                 direct_works: true,
@@ -481,11 +695,24 @@ impl FlareClient {
     }
 
     pub fn from_env_with_rps(origin_url: &str, requests_per_second: Option<f64>) -> Result<Self> {
+        Self::from_env_with_rps_and_session(origin_url, requests_per_second, None)
+    }
+
+    /// Construct a client with an optional named FlareSolverr session.
+    ///
+    /// The session is initialized lazily, after a request actually needs
+    /// FlareSolverr. An explicit FLARESOLVERR_SESSION always takes precedence
+    /// and is never created, refreshed, or destroyed by this client.
+    pub fn from_env_with_rps_and_session(
+        origin_url: &str,
+        requests_per_second: Option<f64>,
+        session_name: Option<&str>,
+    ) -> Result<Self> {
         init_plugin_logging();
         let limiter = requests_per_second.and_then(RateLimiter::new).map(Arc::new);
 
         let flaresolverr_url = std::env::var("FLARESOLVERR_URL").ok();
-        info!(
+        debug!(
             "FlareClient for {}: FLARESOLVERR_URL={:?}",
             origin_url, flaresolverr_url
         );
@@ -497,6 +724,9 @@ impl FlareClient {
                     origin_url: origin_url.to_string(),
                     flaresolverr_url: None,
                     session_id: None,
+                    session_name: session_name
+                        .filter(|name| !name.trim().is_empty())
+                        .map(str::to_string),
                     default_headers: vec![],
                     limiter,
                     direct_works: true,
@@ -506,8 +736,16 @@ impl FlareClient {
         }
 
         let flaresolverr_url = flaresolverr_url.unwrap();
-        // Use a FlareSolverr session only when the user explicitly supplies one.
-        let session_id = std::env::var("FLARESOLVERR_SESSION").ok();
+        let session_id = std::env::var("FLARESOLVERR_SESSION")
+            .ok()
+            .filter(|session| !session.trim().is_empty());
+        let session_name = if session_id.is_none() {
+            session_name
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+        } else {
+            None
+        };
 
         // Solve lazily on the first challenge instead of blocking construction.
         let agent = build_lenient_ureq_agent(Some(DEFAULT_BROWSER_UA));
@@ -519,6 +757,7 @@ impl FlareClient {
                 origin_url: origin_url.to_string(),
                 flaresolverr_url: Some(flaresolverr_url),
                 session_id,
+                session_name,
                 default_headers,
                 limiter,
                 direct_works: true,
@@ -549,7 +788,7 @@ impl FlareClient {
             .direct_disabled_until
             .is_some_and(|until| Instant::now() >= until)
         {
-            info!(
+            debug!(
                 "FlareClient: direct path cooldown expired for {}, retrying direct",
                 guard.origin_url
             );
@@ -560,7 +799,7 @@ impl FlareClient {
             let remaining = guard
                 .direct_disabled_until
                 .map(|until| until.saturating_duration_since(Instant::now()));
-            info!(
+            debug!(
                 "FlareClient: direct path disabled for {} ({:?} cooldown remaining), going straight to proxy",
                 guard.origin_url, remaining
             );
@@ -617,7 +856,7 @@ impl FlareClient {
                     return Ok(text);
                 }
                 Ok(DirectResult::Challenged(status)) => {
-                    info!(
+                    debug!(
                         "FlareClient: direct {} got challenged (HTTP {}) for {}",
                         method, status, url
                     );
@@ -635,7 +874,7 @@ impl FlareClient {
                             url
                         ));
                     }
-                    info!(
+                    debug!(
                         "FlareClient: direct {} returned HTTP {} for {}, escalating",
                         method, status, url
                     );
@@ -663,7 +902,7 @@ impl FlareClient {
                     );
                     match direct_request(self, url) {
                         Ok(DirectResult::Success(text)) => {
-                            info!(
+                            debug!(
                                 "FlareClient: direct {} succeeded after re-solve for {}",
                                 method, url
                             );
@@ -685,7 +924,7 @@ impl FlareClient {
                                     url
                                 ));
                             }
-                            info!(
+                            debug!(
                                 "FlareClient: direct {} returned HTTP {} after re-solve for {}, escalating",
                                 method, status, url
                             );
@@ -717,14 +956,27 @@ impl FlareClient {
             }
         }
 
-        let (fs_url_opt, session_id_opt) = {
-            let guard = self.lock_inner();
-            (guard.flaresolverr_url.clone(), guard.session_id.clone())
+        let fs_url_opt = { self.lock_inner().flaresolverr_url.clone() };
+        let session_id_opt = match self.session_for_request() {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                warn!(
+                    "FlareClient: could not initialize a persistent session for {} {}, using a temporary FlareSolverr request: {:#}",
+                    method, url, error
+                );
+                None
+            }
         };
 
         if let Some(fs_url) = fs_url_opt {
-            info!("FlareClient: proxying {} {} via FlareSolverr", method, url);
-            match proxy_request(&fs_url, session_id_opt.as_deref(), url) {
+            debug!("FlareClient: proxying {} {} via FlareSolverr", method, url);
+            match self.proxy_with_session_retry(
+                &fs_url,
+                method,
+                url,
+                session_id_opt.as_deref(),
+                &proxy_request,
+            ) {
                 Ok(text) => return Ok(text),
                 Err(e) => {
                     warn!("FlareClient: proxy {} failed for {}: {:#}", method, url, e);
@@ -876,7 +1128,7 @@ fn classify_direct_response(mut resp: HttpResponse) -> Result<DirectResult> {
     let body = resp.body_mut().read_to_string()?;
 
     if let Some(marker) = cf_challenge_marker(status, &body) {
-        info!(
+        debug!(
             "FlareClient: HTTP {} ({} bytes) classified as challenge, marker: {}",
             status,
             body.len(),
@@ -1630,6 +1882,52 @@ mod test {
         let client = FlareClient::from_env_or_plain("https://example.com");
         let guard = client.inner.lock().unwrap();
         assert!(guard.flaresolverr_url.is_none());
+    }
+
+    #[test]
+    fn test_named_session_is_lazy_and_explicit_override_wins() {
+        let _guard = env_test_guard();
+        let previous_url = env::var("FLARESOLVERR_URL").ok();
+        let previous_session = env::var("FLARESOLVERR_SESSION").ok();
+
+        unsafe {
+            env::set_var("FLARESOLVERR_URL", "http://127.0.0.1:8191/v1");
+            env::remove_var("FLARESOLVERR_SESSION");
+        }
+
+        let client = FlareClient::from_env_with_rps_and_session(
+            "https://example.com",
+            None,
+            Some("tanoshi-example"),
+        )
+        .unwrap();
+        let guard = client.inner.lock().unwrap();
+        assert!(guard.session_id.is_none());
+        assert_eq!(guard.session_name.as_deref(), Some("tanoshi-example"));
+        drop(guard);
+
+        unsafe { env::set_var("FLARESOLVERR_SESSION", "user-supplied") };
+        let overridden = FlareClient::from_env_with_rps_and_session(
+            "https://example.com",
+            None,
+            Some("tanoshi-example"),
+        )
+        .unwrap();
+        let guard = overridden.inner.lock().unwrap();
+        assert_eq!(guard.session_id.as_deref(), Some("user-supplied"));
+        assert!(guard.session_name.is_none());
+        drop(guard);
+
+        unsafe {
+            match previous_url {
+                Some(value) => env::set_var("FLARESOLVERR_URL", value),
+                None => env::remove_var("FLARESOLVERR_URL"),
+            }
+            match previous_session {
+                Some(value) => env::set_var("FLARESOLVERR_SESSION", value),
+                None => env::remove_var("FLARESOLVERR_SESSION"),
+            }
+        }
     }
 
     // --- FlareClient::re_solve without FS ----------------------------------

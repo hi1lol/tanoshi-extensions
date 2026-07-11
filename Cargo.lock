@@ -734,10 +734,11 @@ dependencies = [
 
 [[package]]
 name = "manhwa18cc"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
  "bytes",
+ "extension-utils",
  "lazy_static",
  "log",
  "madara",

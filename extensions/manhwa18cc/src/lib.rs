@@ -4,20 +4,9 @@ use lazy_static::lazy_static;
 use madara::{get_chapters_old, get_manga_detail, parse_manga_list, search_manga_old};
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use scraper::{Html, Selector};
-use std::env;
-use tanoshi_lib::prelude::{Extension, Input, Lang, PluginRegistrar, SourceInfo};
+use tanoshi_lib::prelude::{Extension, Input, Lang, SourceInfo};
 
-tanoshi_lib::export_plugin!(register);
-
-fn register(registrar: &mut dyn PluginRegistrar) {
-    networking::init_plugin_logging();
-    log::info!(
-        "Registering {} extension v{}",
-        NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    registrar.register_function(Box::new(Manhwa18cc::default()));
-}
+extension_utils::export_extension!(register, Manhwa18cc, NAME);
 
 lazy_static! {
     static ref PREFERENCES: Vec<Input> = vec![];
@@ -59,21 +48,7 @@ fn get_manga_list(
 }
 
 impl Extension for Manhwa18cc {
-    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
-        for input in preferences {
-            for pref in self.preferences.iter_mut() {
-                if input.eq(pref) {
-                    *pref = input.clone();
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn get_preferences(&self) -> anyhow::Result<Vec<Input>> {
-        Ok(self.preferences.clone())
-    }
+    extension_utils::impl_preferences!(preferences);
 
     fn get_source_info(&self) -> SourceInfo {
         SourceInfo {

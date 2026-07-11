@@ -258,14 +258,22 @@ pub fn get_manga_detail<C: DetailClient>(
     let selector_desc = Selector::parse("div.description-summary div.summary__content, div.summary_content div.post-content_item > h5 + div, div.summary_content div.manga-excerpt, div.summary-text p")
         .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
 
-    let title = doc
-        .select(&selector_name)
-        .next()
+    // Madara title elements often carry badge spans before the title text
+    // (e.g. <h1><span>18+</span> Title</h1> on manhwa18.cc), so prefer the
+    // trailing text node and only fall back to collecting all descendant
+    // text when the title is fully wrapped in a child element.
+    let title_element = doc.select(&selector_name).next();
+    let title = title_element
         .and_then(|item| item.last_child())
-        .and_then(|t| t.value().as_text())
-        .map(|text| text.trim())
+        .and_then(|node| node.value().as_text())
+        .map(|text| text.trim().to_string())
         .filter(|title| !title.is_empty())
-        .map(str::to_string)
+        .or_else(|| {
+            title_element
+                .map(|item| item.text().collect::<String>())
+                .map(|text| text.trim().to_string())
+                .filter(|title| !title.is_empty())
+        })
         .ok_or_else(|| anyhow!("no title found at {url}{path}"))?;
 
     Ok(MangaInfo {
@@ -535,5 +543,37 @@ mod test {
             error.to_string(),
             "no title found at https://example.test/missing"
         );
+    }
+
+    #[test]
+    fn get_manga_detail_collects_fully_wrapped_title_text() {
+        // Title entirely inside a child element: no trailing text node, so
+        // the collected-text fallback must kick in.
+        let result = get_manga_detail(
+            "https://example.test",
+            "/wrapped",
+            1,
+            &StaticClient(r#"<div class="post-title"><h1><span>Wrapped title</span></h1></div>"#),
+        )
+        .expect("wrapped title should parse");
+
+        assert_eq!(result.title, "Wrapped title");
+    }
+
+    #[test]
+    fn get_manga_detail_skips_badge_span_before_title() {
+        // Regression: manhwa18.cc marks adult series with a badge span inside
+        // the title element; it must not be glued onto the title.
+        let result = get_manga_detail(
+            "https://example.test",
+            "/badged",
+            1,
+            &StaticClient(
+                r#"<div class="post-title"><h1><span>18+</span> Private Tutoring</h1></div>"#,
+            ),
+        )
+        .expect("badged title should parse");
+
+        assert_eq!(result.title, "Private Tutoring");
     }
 }

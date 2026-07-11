@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use chrono::{NaiveDateTime, Utc};
+use chrono::NaiveDateTime;
 use networking::Agent;
 use scraper::{ElementRef, Html, Selector};
 use tanoshi_lib::prelude::{ChapterInfo, MangaInfo};
@@ -210,7 +210,7 @@ pub fn get_chapters(
                 "%B %d, %Y %H:%M",
             )
             .map(|dt| dt.and_utc().timestamp())
-            .unwrap_or_else(|_| Utc::now().timestamp());
+            .unwrap_or(0);
 
             ChapterInfo {
                 source_id,

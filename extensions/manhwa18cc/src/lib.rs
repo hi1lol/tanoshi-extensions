@@ -42,6 +42,22 @@ impl Default for Manhwa18cc {
     }
 }
 
+fn get_manga_list(
+    page: i64,
+    orderby: &str,
+    client: &RateLimitedAgent,
+) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    let mut res = client
+        .get(&format!("{URL}/webtoons/{page}?orderby={orderby}"))
+        .call()?;
+    let body = res.body_mut().read_to_string()?;
+
+    let selector =
+        Selector::parse(".manga-item").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
+
+    parse_manga_list(URL, ID, &body, &selector, false)
+}
+
 impl Extension for Manhwa18cc {
     fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
         for input in preferences {
@@ -73,30 +89,12 @@ impl Extension for Manhwa18cc {
 
     fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
         log::debug!("{NAME}: get_popular_manga page={page}");
-        let mut res = self
-            .client
-            .get(&format!("{}/webtoons/{}?orderby=latest", URL, page))
-            .call()?;
-        let body = res.body_mut().read_to_string()?;
-
-        let selector = Selector::parse(".manga-item")
-            .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
-        parse_manga_list(URL, ID, &body, &selector, false)
+        get_manga_list(page, "trending", &self.client)
     }
 
     fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
-        let mut res = self
-            .client
-            .get(&format!("{}/webtoons/{}?orderby=latest", URL, page))
-            .call()?;
-        let body = res.body_mut().read_to_string()?;
-
-        let selector = Selector::parse(".manga-item")
-            .map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
-
-        parse_manga_list(URL, ID, &body, &selector, false)
+        get_manga_list(page, "latest", &self.client)
     }
 
     fn search_manga(

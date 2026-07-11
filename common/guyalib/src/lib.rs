@@ -100,26 +100,26 @@ pub fn get_pages(url: &str, path: &str, client: &RateLimitedAgent) -> Result<Vec
     let text = resp.body_mut().read_to_string()?;
     let series: Series = serde_json::from_str(&text)?;
 
-    let pages = series
-        .chapters
-        .get(chapter_number)
-        .and_then(|chapter| {
-            let group = first_group_key(&chapter.groups)?;
-            let pages = chapter.groups.get(group)?;
-            Some((chapter.folder.clone(), group, pages))
-        })
-        .map(|(folder, group, pages)| {
-            pages
-                .iter()
-                .map(|page| {
-                    format!(
-                        "{}/media/manga/{}/chapters/{}/{}/{}",
-                        url, series.slug, folder, group, page
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_else(|| vec![]);
+    let chapter = series.chapters.get(chapter_number).ok_or_else(|| {
+        anyhow::anyhow!("chapter {chapter_number} not found in series {series_path}")
+    })?;
+    let group = first_group_key(&chapter.groups)
+        .ok_or_else(|| anyhow::anyhow!("chapter {chapter_number} has no scanlation groups"))?;
+    let pages = chapter
+        .groups
+        .get(group)
+        .filter(|pages| !pages.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!("chapter {chapter_number} has no pages for scanlation group {group}")
+        })?;
 
-    Ok(pages)
+    Ok(pages
+        .iter()
+        .map(|page| {
+            format!(
+                "{}/media/manga/{}/chapters/{}/{}/{}",
+                url, series.slug, chapter.folder, group, page
+            )
+        })
+        .collect())
 }

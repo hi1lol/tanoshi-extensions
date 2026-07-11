@@ -1,11 +1,14 @@
+use anyhow::Result;
 use guyalib::{get_chapters, get_manga_detail, get_manga_list, get_pages};
 use lazy_static::lazy_static;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
-use tanoshi_lib::prelude::{Extension, Input, Lang};
+use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, Lang, MangaInfo, SourceInfo};
 
 const ID: i64 = 7;
 const NAME: &str = "Guya";
 const URL: &str = "https://guya.cubari.moe";
+const ICON_URL: &str = "https://guya.moe/static/logo_small.png";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REQUESTS_PER_SECOND: f64 = 10.0;
 
 extension_utils::export_extension!(register, Guya, NAME);
@@ -31,27 +34,24 @@ impl Default for Guya {
 impl Extension for Guya {
     extension_utils::impl_preferences!(preferences);
 
-    fn get_source_info(&self) -> tanoshi_lib::prelude::SourceInfo {
-        tanoshi_lib::prelude::SourceInfo {
+    fn get_source_info(&self) -> SourceInfo {
+        SourceInfo {
             id: ID,
             name: NAME.to_string(),
             url: URL.to_string(),
-            version: env!("CARGO_PKG_VERSION"),
-            icon: "https://guya.moe/static/logo_small.png",
+            version: VERSION,
+            icon: ICON_URL,
             languages: Lang::Single("en".to_string()),
             nsfw: false,
         }
     }
 
-    fn get_popular_manga(
-        &self,
-        _page: i64,
-    ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_popular_manga(&self, _page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_popular_manga");
         get_manga_list(URL, ID, &self.client)
     }
 
-    fn get_latest_manga(&self, _page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_latest_manga(&self, _page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga");
         get_manga_list(URL, ID, &self.client)
     }
@@ -61,7 +61,7 @@ impl Extension for Guya {
         _page: i64,
         query: Option<String>,
         _filters: Option<Vec<Input>>,
-    ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    ) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: search_manga query={query:?}");
         let manga = get_manga_list(URL, ID, &self.client)?;
 
@@ -75,17 +75,17 @@ impl Extension for Guya {
         }
     }
 
-    fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
+    fn get_manga_detail(&self, path: String) -> Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
         get_manga_detail(URL, &path, ID, &self.client)
     }
 
-    fn get_chapters(&self, path: String) -> anyhow::Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
+    fn get_chapters(&self, path: String) -> Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
         get_chapters(URL, &path, ID, &self.client)
     }
 
-    fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+    fn get_pages(&self, path: String) -> Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
         get_pages(URL, &path, &self.client)
     }

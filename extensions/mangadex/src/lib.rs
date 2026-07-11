@@ -9,9 +9,8 @@ use anyhow::{Result, anyhow, bail};
 use dto::ResultsAtHome;
 use fancy_regex::Regex;
 use lazy_static::lazy_static;
-use log::info;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
-use tanoshi_lib::prelude::*;
+use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, Lang, MangaInfo, SourceInfo};
 
 extension_utils::export_extension!(register, Mangadex, NAME);
 
@@ -19,12 +18,12 @@ lazy_static! {
     static ref PREFERENCES: Vec<Input> = vec![];
 }
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
 const ID: i64 = 2;
 const NAME: &str = "Mangadex";
 const URL: &str = "https://api.mangadex.org";
 const SITE_URL: &str = "https://mangadex.org";
+const ICON_URL: &str = "https://mangadex.org/favicon.ico";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 // While api.mangadex.org has a rate limit of 5 requests per second
 // The /at-home/server endpoint has a 40 requests per min limit ~= 0.66 rps
 const REQUESTS_PER_SECOND: f64 = 5.0;
@@ -42,11 +41,11 @@ impl Default for Mangadex {
         Self {
             preferences: PREFERENCES.clone(),
             client: build_rate_limited_ureq_agent(
-                Some(format!("Tanoshi-Extension/{}", env!("CARGO_PKG_VERSION")).as_str()),
+                Some(format!("Tanoshi-Extension/{VERSION}").as_str()),
                 Some(REQUESTS_PER_SECOND),
             ),
             client_at_home: build_rate_limited_ureq_agent(
-                Some(format!("Tanoshi-Extension/{}", env!("CARGO_PKG_VERSION")).as_str()),
+                Some(format!("Tanoshi-Extension/{VERSION}").as_str()),
                 Some(REQUESTS_PER_SECOND_AT_HOME),
             ),
         }
@@ -69,11 +68,11 @@ fn remove_bbcode(string: String) -> String {
 pub fn map_tags_to_string(relationships: Vec<Relationship>) -> Vec<String> {
     let mut tags = vec![];
     for relationship in relationships {
-        if let Relationship::Tag { attributes, .. } = relationship {
-            if let Some(name) = attributes.and_then(|attr| attr.name.get("en").cloned()) {
-                tags.push(name.to_owned());
-            }
-        };
+        if let Relationship::Tag { attributes, .. } = relationship
+            && let Some(name) = attributes.and_then(|attr| attr.name.get("en").cloned())
+        {
+            tags.push(name);
+        }
     }
 
     tags
@@ -162,10 +161,10 @@ pub fn map_result_to_chapter(data: Relationship) -> Option<ChapterInfo> {
         } => {
             let mut scanlator = "".to_string();
             for relationship in relationships {
-                if let Relationship::ScanlationGroup { attributes, .. } = relationship {
-                    if let Some(name) = attributes.map(|attr| attr.name) {
-                        scanlator = name;
-                    }
+                if let Relationship::ScanlationGroup { attributes, .. } = relationship
+                    && let Some(name) = attributes.map(|attr| attr.name)
+                {
+                    scanlator = name;
                 }
             }
 
@@ -256,13 +255,13 @@ impl Extension for Mangadex {
             name: NAME.to_string(),
             url: URL.to_string(),
             version: VERSION,
-            icon: "https://mangadex.org/favicon.ico",
+            icon: ICON_URL,
             languages: Lang::All,
             nsfw: true,
         }
     }
 
-    fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+    fn get_popular_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_popular_manga page={page}");
         let query = request::MangaList {
             order: Some(ListOrder {
@@ -274,7 +273,7 @@ impl Extension for Mangadex {
         self.get_manga_list(page, query)
     }
 
-    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+    fn get_latest_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
         self.get_manga_list(
             page,
@@ -293,7 +292,7 @@ impl Extension for Mangadex {
         page: i64,
         query: Option<String>,
         filters: Option<Vec<Input>>,
-    ) -> anyhow::Result<Vec<MangaInfo>> {
+    ) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: search_manga page={page} query={query:?}");
         let query_list = if let Some(filters) = filters {
             filters.into()
@@ -315,7 +314,7 @@ impl Extension for Mangadex {
         self.get_manga_list(page, query_list)
     }
 
-    fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
+    fn get_manga_detail(&self, path: String) -> Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
         let url = format!(
             "{}{}?includes[]=author&includes[]=artist&includes[]=cover_art",
@@ -331,7 +330,7 @@ impl Extension for Mangadex {
         }
     }
 
-    fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
+    fn get_chapters(&self, path: String) -> Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
         let mut offset = 0;
         let mut chapters = Vec::new();
@@ -378,11 +377,11 @@ impl Extension for Mangadex {
         Ok(chapters)
     }
 
-    fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+    fn get_pages(&self, path: String) -> Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
         let chapter_id = path.replace("/chapter/", "");
         let url = format!("{}/at-home/server/{}", URL, chapter_id);
-        info!("URL = {:?}", url);
+        log::debug!("{NAME}: get_pages at-home url={url}");
 
         let mut resp = self.client_at_home.get(&url).call()?;
         let res: ResultsAtHome = resp.body_mut().read_json()?;
@@ -392,10 +391,6 @@ impl Extension for Mangadex {
         }
 
         Ok(pages)
-    }
-
-    fn headers(&self) -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::new()
     }
 
     fn filter_list(&self) -> Vec<Input> {

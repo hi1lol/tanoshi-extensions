@@ -424,23 +424,23 @@ pub mod request {
                             })
                             .collect();
                     }
-                } else if CONTENT_RATING_FILTER.eq(&filter) {
-                    if let Input::Group { state, .. } = filter {
-                        content_rating = state
-                            .iter()
-                            .filter_map(|input| {
-                                if let Input::Checkbox { name, state } = input {
-                                    if state.unwrap_or(false) {
-                                        Rating::from_str(name).ok()
-                                    } else {
-                                        None
-                                    }
+                } else if CONTENT_RATING_FILTER.eq(&filter)
+                    && let Input::Group { state, .. } = filter
+                {
+                    content_rating = state
+                        .iter()
+                        .filter_map(|input| {
+                            if let Input::Checkbox { name, state } = input {
+                                if state.unwrap_or(false) {
+                                    Rating::from_str(name).ok()
                                 } else {
                                     None
                                 }
-                            })
-                            .collect();
-                    }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                 }
             }
 

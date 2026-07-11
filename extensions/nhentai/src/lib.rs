@@ -14,6 +14,8 @@ use urlencoding::encode;
 const ID: i64 = 6;
 const NAME: &str = "nhentai";
 const URL: &str = "https://nhentai.net";
+const ICON_URL: &str = "https://nhentai.net/static/img/logo.14bbfa78d3d0.svg";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REQUESTS_PER_SECOND: f64 = 10.0;
 const GALLERY_CACHE_CAPACITY: usize = 4;
 const GALLERY_CACHE_TTL: Duration = Duration::from_secs(15);
@@ -422,26 +424,21 @@ impl NHentai {
 
         // preferences: language + global blacklist
         for pref in self.preferences.iter() {
-            if LANGUAGE_SELECT.eq(pref) {
-                if let Input::Select { state, values, .. } = pref {
-                    if let Some(InputType::String(lang)) =
-                        state.and_then(|i| values.get(i as usize))
-                    {
-                        if lang != "Any" {
-                            query.push(format!("language:{}", lang.to_lowercase()));
-                        }
-                    }
-                }
-            } else if BLACKLIST_TAG.eq(pref) {
-                if let Input::Text {
+            if LANGUAGE_SELECT.eq(pref)
+                && let Input::Select { state, values, .. } = pref
+                && let Some(InputType::String(lang)) = state.and_then(|i| values.get(i as usize))
+                && lang != "Any"
+            {
+                query.push(format!("language:{}", lang.to_lowercase()));
+            } else if BLACKLIST_TAG.eq(pref)
+                && let Input::Text {
                     state: Some(state), ..
                 } = pref
-                {
-                    for tag in state.split(',') {
-                        let t = norm_value(tag);
-                        if !t.is_empty() {
-                            query.push(format!("-tag:{t}"));
-                        }
+            {
+                for tag in state.split(',') {
+                    let t = norm_value(tag);
+                    if !t.is_empty() {
+                        query.push(format!("-tag:{t}"));
                     }
                 }
             }
@@ -528,7 +525,7 @@ impl NHentai {
                 .select(&image_selector)
                 .flat_map(|thumbnail| thumbnail.value().attr("src"))
                 .next()
-                .map(|s| normalize_url(s))
+                .map(normalize_url)
                 .ok_or_else(|| anyhow!("cover_url not found"))?;
 
             let path = gallery
@@ -578,14 +575,14 @@ impl Extension for NHentai {
             id: ID,
             name: NAME.to_string(),
             url: URL.to_string(),
-            version: env!("CARGO_PKG_VERSION"),
-            icon: "https://nhentai.net/static/img/logo.14bbfa78d3d0.svg",
+            version: VERSION,
+            icon: ICON_URL,
             languages: Lang::Multi(vec!["en".to_string(), "ja".to_string(), "zh".to_string()]),
             nsfw: true,
         }
     }
 
-    fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+    fn get_popular_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_popular_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
@@ -595,7 +592,7 @@ impl Extension for NHentai {
         )
     }
 
-    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+    fn get_latest_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
@@ -607,7 +604,7 @@ impl Extension for NHentai {
         page: i64,
         query: Option<String>,
         filters: Option<Vec<Input>>,
-    ) -> anyhow::Result<Vec<MangaInfo>> {
+    ) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: search_manga page={page} query={query:?}");
         let url = if let Some(filters) = filters {
             let (q_raw, sort) = self.query_parts(Some(filters));
@@ -625,7 +622,7 @@ impl Extension for NHentai {
         self.get_manga_list(&url, true)
     }
 
-    fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
+    fn get_manga_detail(&self, path: String) -> Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
         let res = self.fetch_gallery(&path)?;
 
@@ -654,12 +651,11 @@ impl Extension for NHentai {
         let mut description = "".to_string();
         if let Some(gallery_id) = document.select(&gallery_id_selector).next().map(|el| {
             el.text()
-                .into_iter()
                 .map(|id| id.to_string())
                 .collect::<Vec<String>>()
                 .join("")
         }) {
-            description = format!("{}", gallery_id);
+            description = gallery_id;
         }
         let parodies = document
             .select(&parodies_selector)
@@ -695,7 +691,6 @@ impl Extension for NHentai {
         }
         if let Some(pages) = document.select(&pages_selector).next().map(|el| {
             el.text()
-                .into_iter()
                 .map(|id| id.to_string())
                 .collect::<Vec<String>>()
                 .join("")
@@ -707,7 +702,7 @@ impl Extension for NHentai {
             .select(&thumbnail_selector)
             .flat_map(|el| el.value().attr("src"))
             .next()
-            .map(|s| normalize_url(s))
+            .map(normalize_url)
             .ok_or_else(|| anyhow!("cover not found"))?;
 
         let title = document
@@ -740,7 +735,7 @@ impl Extension for NHentai {
         Ok(manga)
     }
 
-    fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
+    fn get_chapters(&self, path: String) -> Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
         let res = self.fetch_gallery(&path)?;
 
@@ -768,13 +763,13 @@ impl Extension for NHentai {
             path,
             number: 1_f64,
             scanlator,
-            uploaded: uploaded.unwrap_or_else(|| 0),
+            uploaded: uploaded.unwrap_or(0),
         };
 
         Ok(vec![chapter])
     }
 
-    fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+    fn get_pages(&self, path: String) -> Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
         let gallery_id = path
             .trim_matches('/')
@@ -796,15 +791,11 @@ impl Extension for NHentai {
         build_gallery_page_urls(gallery_id, &gallery, image_server)
     }
 
-    fn headers(&self) -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::new()
-    }
-
     fn filter_list(&self) -> Vec<Input> {
         FILTER_LIST.clone()
     }
 
-    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
+    fn get_image_bytes(&self, url: String) -> Result<Bytes> {
         log::debug!("{NAME}: get_image_bytes url={url}");
         let image_servers = self.fetch_cdn_servers().unwrap_or_else(|error| {
             log::debug!("{NAME}: CDN mirror lookup failed, using original image URL: {error:#}");
@@ -1032,18 +1023,18 @@ mod test {
 
         let mut filters = nhentai.filter_list();
         for filter in filters.iter_mut() {
-            if SORT_FILTER.eq(filter) {
-                if let Input::Select { state, .. } = filter {
-                    *state = Some(1);
-                }
-            } else if TAG_FILTER.eq(filter) {
-                if let Input::Text { state, .. } = filter {
-                    *state = Some("-big breasts".to_string());
-                }
-            } else if PARODIES_FILTER.eq(filter) {
-                if let Input::Text { state, .. } = filter {
-                    *state = Some("azur-lane".to_string());
-                }
+            if SORT_FILTER.eq(filter)
+                && let Input::Select { state, .. } = filter
+            {
+                *state = Some(1);
+            } else if TAG_FILTER.eq(filter)
+                && let Input::Text { state, .. } = filter
+            {
+                *state = Some("-big breasts".to_string());
+            } else if PARODIES_FILTER.eq(filter)
+                && let Input::Text { state, .. } = filter
+            {
+                *state = Some("azur-lane".to_string());
             }
         }
         let res = nhentai.search_manga(1, None, Some(filters)).unwrap();

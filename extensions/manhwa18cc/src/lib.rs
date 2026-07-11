@@ -1,9 +1,9 @@
-use anyhow::{anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use lazy_static::lazy_static;
 use madara::{get_chapters_old, get_manga_detail, parse_manga_list, search_manga_old};
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use scraper::{Html, Selector};
-use tanoshi_lib::prelude::{Extension, Input, Lang, SourceInfo};
+use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, Lang, MangaInfo, SourceInfo};
 
 extension_utils::export_extension!(register, Manhwa18cc, NAME);
 
@@ -14,6 +14,8 @@ lazy_static! {
 const ID: i64 = 8;
 const NAME: &str = "Manhwa18cc";
 const URL: &str = "https://manhwa18.cc";
+const ICON_URL: &str = "https://manhwa18.cc/images/favicon-160x160.png";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REQUESTS_PER_SECOND: f64 = 10.0;
 
 pub struct Manhwa18cc {
@@ -30,11 +32,7 @@ impl Default for Manhwa18cc {
     }
 }
 
-fn get_manga_list(
-    page: i64,
-    orderby: &str,
-    client: &RateLimitedAgent,
-) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+fn get_manga_list(page: i64, orderby: &str, client: &RateLimitedAgent) -> Result<Vec<MangaInfo>> {
     let body = client.fetch_text(&format!("{URL}/webtoons/{page}?orderby={orderby}"))?;
 
     let selector =
@@ -51,19 +49,19 @@ impl Extension for Manhwa18cc {
             id: ID,
             name: NAME.to_string(),
             url: URL.to_string(),
-            version: env!("CARGO_PKG_VERSION"),
-            icon: "https://manhwa18.cc/images/favicon-160x160.png",
+            version: VERSION,
+            icon: ICON_URL,
             languages: Lang::Multi(vec!["en".to_string(), "ko".to_string()]),
             nsfw: true,
         }
     }
 
-    fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_popular_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_popular_manga page={page}");
         get_manga_list(page, "trending", &self.client)
     }
 
-    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_latest_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
         get_manga_list(page, "latest", &self.client)
     }
@@ -73,7 +71,7 @@ impl Extension for Manhwa18cc {
         page: i64,
         query: Option<String>,
         _: Option<Vec<Input>>,
-    ) -> anyhow::Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    ) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: search_manga page={page} query={query:?}");
         if let Some(query) = query {
             search_manga_old(URL, ID, page, &query, &self.client)
@@ -82,17 +80,17 @@ impl Extension for Manhwa18cc {
         }
     }
 
-    fn get_manga_detail(&self, path: String) -> anyhow::Result<tanoshi_lib::prelude::MangaInfo> {
+    fn get_manga_detail(&self, path: String) -> Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
         get_manga_detail(URL, &path, ID, &self.client)
     }
 
-    fn get_chapters(&self, path: String) -> anyhow::Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
+    fn get_chapters(&self, path: String) -> Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
         get_chapters_old(URL, &path, ID, &self.client)
     }
 
-    fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+    fn get_pages(&self, path: String) -> Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
         let body = self.client.fetch_text(&format!("{}{}", URL, path))?;
 

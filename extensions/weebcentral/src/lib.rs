@@ -39,6 +39,18 @@ fn parse_upload_timestamp(upload: &str) -> i64 {
         .unwrap_or(0)
 }
 
+fn parse_chapter_number(title: &str) -> Option<f64> {
+    let lower = title.to_ascii_lowercase();
+    let start = lower.find("chapter")? + "chapter".len();
+    let number = title[start..]
+        .trim_start()
+        .split(|character: char| !character.is_ascii_digit() && character != '.')
+        .next()?
+        .trim_end_matches('.');
+
+    number.parse().ok()
+}
+
 fn find_sidebar_section<'a>(
     document: &'a Html,
     sidebar_selector: &Selector,
@@ -296,13 +308,13 @@ impl Extension for Weebcentral {
 
         let chapter_count = document.select(&chapter_selector).count();
         let mut chapters = vec![];
-        let mut number = chapter_count.clone();
 
-        for chapter in document.select(&chapter_selector) {
+        for (index, chapter) in document.select(&chapter_selector).enumerate() {
             let title = chapter.select(&title_selector).next().map_or_else(
                 || "Unknown Title".to_string(),
                 |el| el.inner_html().trim().to_string(),
             );
+            let fallback_number = chapter_count.saturating_sub(index) as f64;
 
             let link = chapter.select(&link_selector).next().map_or_else(
                 || "".to_string(),
@@ -321,11 +333,10 @@ impl Extension for Weebcentral {
                     "/chapters/{}",
                     link.clone().split('/').nth(4).unwrap_or("").to_string()
                 ),
-                number: number as f64,
+                number: parse_chapter_number(&title).unwrap_or(fallback_number),
                 scanlator: None,
                 uploaded: parse_upload_timestamp(&upload),
             });
-            number -= 1;
         }
 
         Ok(chapters)
@@ -364,6 +375,13 @@ impl Extension for Weebcentral {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn parse_chapter_number_handles_decimals_and_specials() {
+        assert_eq!(parse_chapter_number("Chapter 12.5"), Some(12.5));
+        assert_eq!(parse_chapter_number("chapter 7 - The Return"), Some(7.0));
+        assert_eq!(parse_chapter_number("Special 1"), None);
+    }
 
     // Planetes: completed series, so the values asserted below are stable.
     const MANGA_PATH: &str = "/series/01J76XY8K8BPR60XQNGPTEJ767";

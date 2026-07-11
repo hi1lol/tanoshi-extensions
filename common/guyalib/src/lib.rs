@@ -48,7 +48,7 @@ pub fn get_manga_detail(
     Ok(MangaInfo {
         source_id,
         title: series.title.clone(),
-        author: vec![series.author.clone(), series.author.clone()],
+        author: vec![series.author.clone(), series.artist.clone()],
         genre: vec![],
         status: Some("Ongoing".to_string()),
         description: Some(series.description.clone()),

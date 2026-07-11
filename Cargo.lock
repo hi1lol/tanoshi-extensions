@@ -437,18 +437,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5419bdc4f6a9207fbeba6d11b604d481addf78ecd10c11ad51e76c2f6482748d"
 
 [[package]]
-name = "html2text"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ec3405a4163878f29357e1156eacd5c9d72803b62925f190c865d1cae8105d5"
-dependencies = [
- "html5ever",
- "tendril",
- "thiserror",
- "unicode-width",
-]
-
-[[package]]
 name = "html5ever"
 version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -733,24 +721,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mangakakalot-common"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "fancy-regex",
- "html2text",
- "lazy_static",
- "log",
- "networking",
- "scraper",
- "serde",
- "serde_json",
- "tanoshi-lib",
- "url",
-]
-
-[[package]]
 name = "manhwa18cc"
 version = "0.5.7"
 dependencies = [
@@ -800,22 +770,6 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
-]
-
-[[package]]
-name = "nepnep"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "fancy-regex",
- "lazy_static",
- "log",
- "networking",
- "scraper",
- "serde",
- "serde_json",
- "tanoshi-lib",
 ]
 
 [[package]]
@@ -1802,33 +1756,6 @@ name = "windows_x86_64_msvc"
 version = "0.52.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
-
-[[package]]
-name = "wpmangareader"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "log",
- "networking",
- "scraper",
- "tanoshi-lib",
-]
-
-[[package]]
-name = "wpmangastream"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "chrono",
- "lazy_static",
- "log",
- "networking",
- "scraper",
- "serde",
- "serde_json",
- "tanoshi-lib",
-]
 
 [[package]]
 name = "writeable"

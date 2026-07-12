@@ -802,7 +802,6 @@ name = "nhentai"
 version = "0.5.8"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
  "extension-utils",
  "lazy_static",

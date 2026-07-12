@@ -1,8 +1,10 @@
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
 use chrono::DateTime;
 use lazy_static::lazy_static;
-use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
+use networking::{
+    FlareClient, RateLimitedAgent, build_rate_limited_flaresolverr_client_for_extension,
+    build_rate_limited_ureq_agent,
+};
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::VecDeque;
@@ -19,7 +21,6 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REQUESTS_PER_SECOND: f64 = 10.0;
 const GALLERY_CACHE_CAPACITY: usize = 4;
 const GALLERY_CACHE_TTL: Duration = Duration::from_secs(15);
-const CDN_CONFIG_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 extension_utils::export_extension!(register, NHentai, NAME);
 
@@ -107,19 +108,9 @@ struct GalleryApiPage {
     path: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct CdnConfigResponse {
     image_servers: Vec<String>,
-}
-
-struct CachedCdnConfig {
-    image_servers: Vec<String>,
-    fetched_at: Instant,
-}
-
-#[derive(Default)]
-struct CdnConfigCache {
-    entry: Option<CachedCdnConfig>,
 }
 
 fn parse_api_response<T: DeserializeOwned>(body: &str, resource: &str) -> Result<T> {
@@ -142,86 +133,6 @@ fn parse_api_response<T: DeserializeOwned>(body: &str, resource: &str) -> Result
 
     serde_json::from_str(&wrapped_body)
         .map_err(|error| anyhow!("failed to parse NHentai {resource} API response: {error}"))
-}
-
-impl CdnConfigCache {
-    fn get(&mut self) -> Option<Vec<String>> {
-        let entry = self.entry.as_ref()?;
-        if entry.fetched_at.elapsed() > CDN_CONFIG_CACHE_TTL {
-            self.entry = None;
-            return None;
-        }
-
-        Some(entry.image_servers.clone())
-    }
-
-    fn insert(&mut self, image_servers: Vec<String>) {
-        self.entry = Some(CachedCdnConfig {
-            image_servers,
-            fetched_at: Instant::now(),
-        });
-    }
-
-    fn promote(&mut self, image_server: &str) {
-        let Some(entry) = self.entry.as_mut() else {
-            return;
-        };
-        let Some(index) = entry
-            .image_servers
-            .iter()
-            .position(|server| server == image_server)
-        else {
-            return;
-        };
-        if index != 0 {
-            let server = entry.image_servers.remove(index);
-            entry.image_servers.insert(0, server);
-        }
-    }
-}
-
-fn normalize_cdn_servers(servers: Vec<String>) -> Vec<String> {
-    let mut normalized = Vec::new();
-    for server in servers {
-        let server = server.trim().trim_end_matches('/');
-        if !server.is_empty() && !normalized.iter().any(|known| known == server) {
-            normalized.push(server.to_string());
-        }
-    }
-    normalized
-}
-
-fn build_cdn_image_candidates(url: &str, image_servers: &[String]) -> Vec<(String, String)> {
-    let suffix = image_servers
-        .iter()
-        .filter_map(|server| {
-            let server = server.trim_end_matches('/');
-            let suffix = url.strip_prefix(server)?;
-            (suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('?'))
-                .then_some(suffix)
-        })
-        .next()
-        .or_else(|| url.find("/galleries/").map(|index| &url[index..]));
-
-    let Some(suffix) = suffix else {
-        return vec![(String::new(), url.to_string())];
-    };
-
-    let mut candidates = Vec::new();
-    for image_server in image_servers {
-        let image_server = image_server.trim_end_matches('/');
-        if image_server.is_empty() {
-            continue;
-        }
-        let candidate = format!("{image_server}{suffix}");
-        if !candidates.iter().any(|(_, known)| known == &candidate) {
-            candidates.push((image_server.to_string(), candidate));
-        }
-    }
-    if !candidates.iter().any(|(_, known)| known == url) {
-        candidates.push((String::new(), url.to_string()));
-    }
-    candidates
 }
 
 impl GalleryPageCache {
@@ -252,8 +163,8 @@ impl GalleryPageCache {
 pub struct NHentai {
     preferences: Vec<Input>,
     client: FlareClient,
+    image_client: RateLimitedAgent,
     gallery_cache: Mutex<GalleryPageCache>,
-    cdn_cache: Mutex<CdnConfigCache>,
 }
 
 impl Default for NHentai {
@@ -265,8 +176,8 @@ impl Default for NHentai {
                 Some(REQUESTS_PER_SECOND),
                 "nhentai",
             ),
+            image_client: build_rate_limited_ureq_agent(None, Some(REQUESTS_PER_SECOND)),
             gallery_cache: Mutex::new(GalleryPageCache::default()),
-            cdn_cache: Mutex::new(CdnConfigCache::default()),
         }
     }
 }
@@ -369,53 +280,6 @@ impl NHentai {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.insert(url, body.clone());
         Ok(body)
-    }
-
-    fn fetch_cdn_servers(&self) -> Result<Vec<String>> {
-        {
-            let mut cache = self
-                .cdn_cache
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(image_servers) = cache.get() {
-                log::debug!("{NAME}: CDN config cache hit");
-                return Ok(image_servers);
-            }
-        }
-
-        let cdn_url = format!("{URL}/api/v2/cdn");
-        let cdn_res = self
-            .client
-            .fetch_text(&cdn_url)
-            .map_err(|e| anyhow!(e.to_string()))?;
-        let cdn: CdnConfigResponse = parse_api_response(&cdn_res, "CDN")?;
-        let image_servers = normalize_cdn_servers(cdn.image_servers);
-        if image_servers.is_empty() {
-            return Err(anyhow!("NHentai CDN API returned no image servers"));
-        }
-
-        let mut cache = self
-            .cdn_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.insert(image_servers.clone());
-        Ok(image_servers)
-    }
-
-    fn promote_cdn_server(&self, image_server: &str) {
-        let mut cache = self
-            .cdn_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.promote(image_server);
-    }
-
-    fn invalidate_cdn_cache(&self) {
-        let mut cache = self
-            .cdn_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.entry = None;
     }
 
     fn query_parts(&self, filters: Option<Vec<Input>>) -> (String, Option<String>) {
@@ -783,8 +647,14 @@ impl Extension for NHentai {
             .map_err(|e| anyhow!(e.to_string()))?;
         let gallery: GalleryApiResponse = parse_api_response(&gallery_res, "gallery")?;
 
-        let image_servers = self.fetch_cdn_servers()?;
-        let image_server = image_servers
+        let cdn_url = format!("{URL}/api/v2/cdn");
+        let cdn_res = self
+            .client
+            .fetch_text(&cdn_url)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let cdn: CdnConfigResponse = parse_api_response(&cdn_res, "CDN")?;
+        let image_server = cdn
+            .image_servers
             .first()
             .ok_or_else(|| anyhow!("NHentai CDN API returned no image servers"))?;
 
@@ -795,33 +665,7 @@ impl Extension for NHentai {
         FILTER_LIST.clone()
     }
 
-    fn get_image_bytes(&self, url: String) -> Result<Bytes> {
-        log::debug!("{NAME}: get_image_bytes url={url}");
-        let image_servers = self.fetch_cdn_servers().unwrap_or_else(|error| {
-            log::debug!("{NAME}: CDN mirror lookup failed, using original image URL: {error:#}");
-            Vec::new()
-        });
-        let candidates = build_cdn_image_candidates(&url, &image_servers);
-        let mut last_error = None;
-
-        for (image_server, candidate) in candidates {
-            match self.client.fetch_bytes(&candidate) {
-                Ok(bytes) => {
-                    if !image_server.is_empty() {
-                        self.promote_cdn_server(&image_server);
-                    }
-                    return Ok(bytes);
-                }
-                Err(error) => {
-                    log::debug!("{NAME}: CDN image candidate failed url={candidate}: {error:#}");
-                    last_error = Some(error);
-                }
-            }
-        }
-
-        self.invalidate_cdn_cache();
-        Err(last_error.unwrap_or_else(|| anyhow!("NHentai image URL list was empty")))
-    }
+    extension_utils::impl_direct_image_fetch!(image_client, NAME, URL);
 }
 
 #[cfg(test)]
@@ -866,65 +710,6 @@ mod test {
         assert_eq!(
             cache.get("https://nhentai.net/g/two"),
             Some("two".to_string())
-        );
-    }
-
-    #[test]
-    fn cdn_cache_reuses_and_promotes_mirrors() {
-        let mut cache = CdnConfigCache::default();
-        cache.insert(vec![
-            "https://i1.nhentai.net".to_string(),
-            "https://i2.nhentai.net".to_string(),
-        ]);
-
-        assert_eq!(
-            cache.get(),
-            Some(vec![
-                "https://i1.nhentai.net".to_string(),
-                "https://i2.nhentai.net".to_string(),
-            ])
-        );
-
-        cache.promote("https://i2.nhentai.net");
-        assert_eq!(
-            cache.get(),
-            Some(vec![
-                "https://i2.nhentai.net".to_string(),
-                "https://i1.nhentai.net".to_string(),
-            ])
-        );
-    }
-
-    #[test]
-    fn cdn_image_candidates_preserve_query_and_include_mirrors() {
-        let servers = vec![
-            "https://i1.nhentai.net".to_string(),
-            "https://i2.nhentai.net".to_string(),
-            "https://i3.nhentai.net".to_string(),
-        ];
-        let url = "https://i1.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net";
-
-        let candidates = build_cdn_image_candidates(url, &servers);
-
-        assert_eq!(
-            candidates[0],
-            ("https://i1.nhentai.net".to_string(), url.to_string())
-        );
-        assert_eq!(
-            candidates[1],
-            (
-                "https://i2.nhentai.net".to_string(),
-                "https://i2.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net"
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            candidates[2],
-            (
-                "https://i3.nhentai.net".to_string(),
-                "https://i3.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net"
-                    .to_string()
-            )
         );
     }
 

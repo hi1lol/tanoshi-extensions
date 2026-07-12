@@ -21,6 +21,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REQUESTS_PER_SECOND: f64 = 10.0;
 const GALLERY_CACHE_CAPACITY: usize = 4;
 const GALLERY_CACHE_TTL: Duration = Duration::from_secs(15);
+const CDN_CONFIG_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
 extension_utils::export_extension!(register, NHentai, NAME);
 
@@ -113,6 +114,16 @@ struct CdnConfigResponse {
     image_servers: Vec<String>,
 }
 
+struct CachedCdnConfig {
+    image_servers: Vec<String>,
+    fetched_at: Instant,
+}
+
+#[derive(Default)]
+struct CdnConfigCache {
+    entry: Option<CachedCdnConfig>,
+}
+
 fn parse_api_response<T: DeserializeOwned>(body: &str, resource: &str) -> Result<T> {
     let direct_error = match serde_json::from_str(body) {
         Ok(response) => return Ok(response),
@@ -133,6 +144,25 @@ fn parse_api_response<T: DeserializeOwned>(body: &str, resource: &str) -> Result
 
     serde_json::from_str(&wrapped_body)
         .map_err(|error| anyhow!("failed to parse NHentai {resource} API response: {error}"))
+}
+
+impl CdnConfigCache {
+    fn get(&mut self) -> Option<Vec<String>> {
+        let entry = self.entry.as_ref()?;
+        if entry.fetched_at.elapsed() > CDN_CONFIG_CACHE_TTL {
+            self.entry = None;
+            return None;
+        }
+
+        Some(entry.image_servers.clone())
+    }
+
+    fn insert(&mut self, image_servers: Vec<String>) {
+        self.entry = Some(CachedCdnConfig {
+            image_servers,
+            fetched_at: Instant::now(),
+        });
+    }
 }
 
 impl GalleryPageCache {
@@ -165,6 +195,7 @@ pub struct NHentai {
     client: FlareClient,
     image_client: RateLimitedAgent,
     gallery_cache: Mutex<GalleryPageCache>,
+    cdn_cache: Mutex<CdnConfigCache>,
 }
 
 impl Default for NHentai {
@@ -178,6 +209,7 @@ impl Default for NHentai {
             ),
             image_client: build_rate_limited_ureq_agent(None, Some(REQUESTS_PER_SECOND)),
             gallery_cache: Mutex::new(GalleryPageCache::default()),
+            cdn_cache: Mutex::new(CdnConfigCache::default()),
         }
     }
 }
@@ -280,6 +312,36 @@ impl NHentai {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache.insert(url, body.clone());
         Ok(body)
+    }
+
+    fn fetch_cdn_servers(&self) -> Result<Vec<String>> {
+        {
+            let mut cache = self
+                .cdn_cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if let Some(image_servers) = cache.get() {
+                log::debug!("{NAME}: CDN config cache hit");
+                return Ok(image_servers);
+            }
+        }
+
+        let cdn_url = format!("{URL}/api/v2/cdn");
+        let cdn_res = self
+            .client
+            .fetch_text(&cdn_url)
+            .map_err(|e| anyhow!(e.to_string()))?;
+        let cdn: CdnConfigResponse = parse_api_response(&cdn_res, "CDN")?;
+        if cdn.image_servers.is_empty() {
+            return Err(anyhow!("NHentai CDN API returned no image servers"));
+        }
+
+        let mut cache = self
+            .cdn_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.insert(cdn.image_servers.clone());
+        Ok(cdn.image_servers)
     }
 
     fn query_parts(&self, filters: Option<Vec<Input>>) -> (String, Option<String>) {
@@ -647,14 +709,8 @@ impl Extension for NHentai {
             .map_err(|e| anyhow!(e.to_string()))?;
         let gallery: GalleryApiResponse = parse_api_response(&gallery_res, "gallery")?;
 
-        let cdn_url = format!("{URL}/api/v2/cdn");
-        let cdn_res = self
-            .client
-            .fetch_text(&cdn_url)
-            .map_err(|e| anyhow!(e.to_string()))?;
-        let cdn: CdnConfigResponse = parse_api_response(&cdn_res, "CDN")?;
-        let image_server = cdn
-            .image_servers
+        let image_servers = self.fetch_cdn_servers()?;
+        let image_server = image_servers
             .first()
             .ok_or_else(|| anyhow!("NHentai CDN API returned no image servers"))?;
 

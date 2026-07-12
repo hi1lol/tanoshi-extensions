@@ -1,17 +1,17 @@
 [package]
 name = "manhwa18cc"
-version = "0.5.7"
-edition = "2024"
+version = "0.5.8"
+edition.workspace = true
 
 [lib]
 crate-type = ["cdylib"]
 
 [dependencies]
-networking = { path = "../../common/networking" }
-tanoshi-lib = { git = "https://github.com/luigi311/tanoshi", tag = "v0.38.0" }
+anyhow = { workspace = true }
+extension-utils = { workspace = true }
+lazy_static = { workspace = true }
+log = { workspace = true }
 madara = { path = "../../common/madara" }
-anyhow = "1"
-scraper = "0.24"
-lazy_static = "1"
-bytes = "1"
-log = "0.4"
+networking = { workspace = true }
+scraper = { workspace = true }
+tanoshi-lib = { workspace = true }

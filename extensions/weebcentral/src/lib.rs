@@ -1,25 +1,12 @@
 use anyhow::Result;
-use bytes::Bytes;
 use chrono::prelude::*;
 use lazy_static::lazy_static;
 use networking::{RateLimitedAgent, build_rate_limited_ureq_agent};
 use scraper::{ElementRef, Html, Selector};
-use std::env;
-use tanoshi_lib::extensions::PluginRegistrar;
 use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, Lang, MangaInfo, SourceInfo};
 use urlencoding::encode;
 
-tanoshi_lib::export_plugin!(register);
-
-fn register(registrar: &mut dyn PluginRegistrar) {
-    networking::init_plugin_logging();
-    log::info!(
-        "Registering {} extension v{}",
-        NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    registrar.register_function(Box::new(Weebcentral::default()));
-}
+extension_utils::export_extension!(register, Weebcentral, NAME);
 
 lazy_static! {
     static ref PREFERENCES: Vec<Input> = vec![];
@@ -28,6 +15,8 @@ lazy_static! {
 const ID: i64 = 28;
 const NAME: &str = "WeebCentral";
 const URL: &str = "https://weebcentral.com";
+const ICON_URL: &str = "https://weebcentral.com/static/images/144.png";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REQUESTS_PER_SECOND: f64 = 10.0;
 // Get Pages seems to have its own rate limit
 const PAGES_REQUESTS_PER_SECOND: f64 = 1.0;
@@ -87,7 +76,7 @@ fn get_manga_list(
     suburl: &str,
     client: &RateLimitedAgent,
     allow_empty: bool,
-) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+) -> Result<Vec<MangaInfo>> {
     if page < 1 {
         page = 1;
     }
@@ -95,8 +84,7 @@ fn get_manga_list(
 
     let mut manga_list = Vec::new();
     let url = format!("{}{}{}", URL, suburl, offset);
-    let mut resp = client.get(&url).call()?;
-    let body = resp.body_mut().read_to_string()?;
+    let body = client.fetch_text(&url)?;
     let document = Html::parse_document(&body);
 
     let manga_selector = Selector::parse("article.bg-base-300").unwrap();
@@ -161,7 +149,7 @@ fn get_manga_list(
 
         manga_list.push(MangaInfo {
             source_id: ID,
-            title: title,
+            title,
             author: authors,
             genre: genres,
             status: Some(status),
@@ -186,35 +174,21 @@ fn get_manga_list(
 }
 
 impl Extension for Weebcentral {
-    fn set_preferences(&mut self, preferences: Vec<Input>) -> Result<()> {
-        for input in preferences {
-            for pref in self.preferences.iter_mut() {
-                if input.eq(pref) {
-                    *pref = input.clone();
-                }
-            }
-        }
+    extension_utils::impl_preferences!(preferences);
 
-        Ok(())
-    }
-
-    fn get_preferences(&self) -> Result<Vec<Input>> {
-        Ok(self.preferences.clone())
-    }
-
-    fn get_source_info(&self) -> tanoshi_lib::prelude::SourceInfo {
+    fn get_source_info(&self) -> SourceInfo {
         SourceInfo {
             id: ID,
             name: NAME.to_string(),
             url: URL.to_string(),
-            version: env!("CARGO_PKG_VERSION"),
-            icon: "https://weebcentral.com/static/images/144.png",
+            version: VERSION,
+            icon: ICON_URL,
             languages: Lang::Single("en".to_string()),
             nsfw: false,
         }
     }
 
-    fn get_popular_manga(&self, page: i64) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_popular_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_popular_manga page={page}");
         get_manga_list(
             page,
@@ -224,7 +198,7 @@ impl Extension for Weebcentral {
         )
     }
 
-    fn get_latest_manga(&self, page: i64) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    fn get_latest_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
         get_manga_list(
             page,
@@ -239,7 +213,7 @@ impl Extension for Weebcentral {
         page: i64,
         query: Option<String>,
         _: Option<Vec<Input>>,
-    ) -> Result<Vec<tanoshi_lib::prelude::MangaInfo>> {
+    ) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: search_manga page={page} query={query:?}");
         //TODO: Add filters
         get_manga_list(
@@ -253,10 +227,9 @@ impl Extension for Weebcentral {
         )
     }
 
-    fn get_manga_detail(&self, path: String) -> Result<tanoshi_lib::prelude::MangaInfo> {
+    fn get_manga_detail(&self, path: String) -> Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
-        let mut resp = self.client.get(&format!("{URL}{path}")).call()?;
-        let body = resp.body_mut().read_to_string()?;
+        let body = self.client.fetch_text(&format!("{URL}{path}"))?;
 
         let manga = Html::parse_document(&body);
 
@@ -311,23 +284,21 @@ impl Extension for Weebcentral {
 
         Ok(MangaInfo {
             source_id: ID,
-            title: title,
+            title,
             author: authors,
             genre: genres,
             status: Some(status),
             description: Some(description),
-            path: path,
+            path,
             cover_url,
         })
     }
 
-    fn get_chapters(&self, path: String) -> Result<Vec<tanoshi_lib::prelude::ChapterInfo>> {
+    fn get_chapters(&self, path: String) -> Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
-        let mut resp = self
+        let body = self
             .client
-            .get(&format!("{URL}{path}/full-chapter-list"))
-            .call()?;
-        let body = resp.body_mut().read_to_string()?;
+            .fetch_text(&format!("{URL}{path}/full-chapter-list"))?;
 
         let document = Html::parse_document(&body);
 
@@ -360,10 +331,7 @@ impl Extension for Weebcentral {
             chapters.push(ChapterInfo {
                 source_id: ID,
                 title: title.clone(),
-                path: format!(
-                    "/chapters/{}",
-                    link.clone().split('/').nth(4).unwrap_or("").to_string()
-                ),
+                path: format!("/chapters/{}", link.split('/').nth(4).unwrap_or("")),
                 number: parse_chapter_number(&title).unwrap_or(fallback_number),
                 scanlator: None,
                 uploaded: parse_upload_timestamp(&upload),
@@ -381,13 +349,9 @@ impl Extension for Weebcentral {
 
     fn get_pages(&self, path: String) -> Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
-        let mut resp = self
-            .client_pages
-            .get(&format!(
-                "{URL}{path}/images?is_prev=False&current_page=1&reading_style=single_page"
-            ))
-            .call()?;
-        let body = resp.body_mut().read_to_string()?;
+        let body = self.client_pages.fetch_text(&format!(
+            "{URL}{path}/images?is_prev=False&current_page=1&reading_style=single_page"
+        ))?;
 
         let document = Html::parse_document(&body);
 
@@ -409,10 +373,7 @@ impl Extension for Weebcentral {
         Ok(panels)
     }
 
-    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        log::debug!("{NAME}: get_image_bytes url={url}");
-        self.client.fetch_bytes(&url, Some(URL))
-    }
+    extension_utils::impl_direct_image_fetch!(client, NAME, URL);
 }
 
 #[cfg(test)]

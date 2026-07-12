@@ -18,9 +18,7 @@ impl DetailClient for FlareClient {
 
 impl DetailClient for RateLimitedAgent {
     fn fetch_body(&self, url: &str) -> anyhow::Result<String> {
-        let mut resp = self.get(url).call()?;
-        let body = resp.body_mut().read_to_string()?;
-        Ok(body)
+        self.fetch_text(url)
     }
 }
 
@@ -202,10 +200,7 @@ pub fn search_manga_old(
     query: &str,
     client: &RateLimitedAgent,
 ) -> Result<Vec<MangaInfo>> {
-    let mut resp = client
-        .get(&format!("{}/search?q={}&page={}", url, query, page))
-        .call()?;
-    let body = resp.body_mut().read_to_string()?;
+    let body = client.fetch_text(&format!("{}/search?q={}&page={}", url, query, page))?;
 
     let selector =
         Selector::parse(".manga-item").map_err(|e| anyhow!("failed to parse selector: {:?}", e))?;
@@ -452,8 +447,7 @@ pub fn get_chapters_old(
     source_id: i64,
     client: &RateLimitedAgent,
 ) -> Result<Vec<ChapterInfo>> {
-    let mut resp = client.get(&format!("{}{}", url, path)).call()?;
-    let body = resp.body_mut().read_to_string()?;
+    let body = client.fetch_text(&format!("{}{}", url, path))?;
 
     let doc = Html::parse_document(&body);
 

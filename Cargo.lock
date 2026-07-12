@@ -315,6 +315,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
+name = "extension-utils"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "log",
+ "networking",
+ "tanoshi-lib",
+]
+
+[[package]]
 name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -403,10 +414,10 @@ dependencies = [
 
 [[package]]
 name = "guya"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
- "bytes",
+ "extension-utils",
  "guyalib",
  "lazy_static",
  "log",
@@ -419,12 +430,7 @@ name = "guyalib"
 version = "0.0.0"
 dependencies = [
  "anyhow",
- "chrono",
- "fancy-regex",
- "lazy_static",
- "log",
  "networking",
- "scraper",
  "serde",
  "serde_json",
  "tanoshi-lib",
@@ -692,40 +698,35 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "chrono",
- "lazy_static",
  "log",
  "networking",
  "scraper",
- "serde",
- "serde_json",
  "tanoshi-lib",
 ]
 
 [[package]]
 name = "mangadex"
-version = "0.5.5"
+version = "0.5.6"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
+ "extension-utils",
  "fancy-regex",
  "lazy_static",
  "log",
  "networking",
  "phf 0.13.1",
- "scraper",
  "serde",
- "serde_json",
  "serde_qs",
  "tanoshi-lib",
 ]
 
 [[package]]
 name = "manhwa18cc"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
- "bytes",
+ "extension-utils",
  "lazy_static",
  "log",
  "madara",
@@ -782,7 +783,6 @@ dependencies = [
  "cookie_store",
  "env_logger",
  "log",
- "once_cell",
  "scraper",
  "serde",
  "serde_json",
@@ -799,20 +799,17 @@ checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
 name = "nhentai"
-version = "0.5.7"
+version = "0.5.8"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
+ "extension-utils",
  "lazy_static",
  "log",
  "networking",
- "phf 0.13.1",
  "scraper",
  "serde",
- "serde-aux",
  "serde_json",
- "serde_qs",
  "tanoshi-lib",
  "urlencoding",
 ]
@@ -837,15 +834,6 @@ name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "42f5e15c9953c5e4ccceeb2e7382a716482c34515315f7b03532b8b4e8393d2d"
-
-[[package]]
-name = "ordered-float"
-version = "2.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "68f19d67e5a2795c94e73e0bb1cc1a7edeb2e28efd39e2e1c9b7a40c1108b11c"
-dependencies = [
- "num-traits",
-]
 
 [[package]]
 name = "parking_lot"
@@ -1206,28 +1194,6 @@ checksum = "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e"
 dependencies = [
  "serde_core",
  "serde_derive",
-]
-
-[[package]]
-name = "serde-aux"
-version = "4.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "207f67b28fe90fb596503a9bf0bf1ea5e831e21307658e177c5dfcdfc3ab8a0a"
-dependencies = [
- "chrono",
- "serde",
- "serde-value",
- "serde_json",
-]
-
-[[package]]
-name = "serde-value"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3a1a3341211875ef120e117ea7fd5228530ae7e7036a779fdc9117be6b3282c"
-dependencies = [
- "ordered-float",
- "serde",
 ]
 
 [[package]]
@@ -1611,11 +1577,11 @@ dependencies = [
 
 [[package]]
 name = "weebcentral"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "anyhow",
- "bytes",
  "chrono",
+ "extension-utils",
  "lazy_static",
  "log",
  "networking",

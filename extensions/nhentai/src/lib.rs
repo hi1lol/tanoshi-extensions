@@ -1,38 +1,29 @@
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
 use chrono::DateTime;
 use lazy_static::lazy_static;
-use networking::{FlareClient, build_rate_limited_flaresolverr_client_for_extension};
+use networking::{
+    FlareClient, RateLimitedAgent, build_rate_limited_flaresolverr_client_for_extension,
+    build_rate_limited_ureq_agent,
+};
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, de::DeserializeOwned};
 use std::collections::VecDeque;
-use std::env;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tanoshi_lib::prelude::{
-    ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, PluginRegistrar, SourceInfo,
-};
+use tanoshi_lib::prelude::{ChapterInfo, Extension, Input, InputType, Lang, MangaInfo, SourceInfo};
 use urlencoding::encode;
 
 const ID: i64 = 6;
 const NAME: &str = "nhentai";
 const URL: &str = "https://nhentai.net";
+const ICON_URL: &str = "https://nhentai.net/static/img/logo.14bbfa78d3d0.svg";
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 const REQUESTS_PER_SECOND: f64 = 10.0;
 const GALLERY_CACHE_CAPACITY: usize = 4;
 const GALLERY_CACHE_TTL: Duration = Duration::from_secs(15);
-const CDN_CONFIG_CACHE_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+const CDN_CONFIG_CACHE_TTL: Duration = Duration::from_secs(6 * 60 * 60);
 
-tanoshi_lib::export_plugin!(register);
-
-fn register(registrar: &mut dyn PluginRegistrar) {
-    networking::init_plugin_logging();
-    log::info!(
-        "Registering {} extension v{}",
-        NAME,
-        env!("CARGO_PKG_VERSION")
-    );
-    registrar.register_function(Box::new(NHentai::default()));
-}
+extension_utils::export_extension!(register, NHentai, NAME);
 
 lazy_static! {
     static ref TAG_FILTER: Input = Input::Text {
@@ -118,7 +109,7 @@ struct GalleryApiPage {
     path: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Deserialize)]
 struct CdnConfigResponse {
     image_servers: Vec<String>,
 }
@@ -172,67 +163,6 @@ impl CdnConfigCache {
             fetched_at: Instant::now(),
         });
     }
-
-    fn promote(&mut self, image_server: &str) {
-        let Some(entry) = self.entry.as_mut() else {
-            return;
-        };
-        let Some(index) = entry
-            .image_servers
-            .iter()
-            .position(|server| server == image_server)
-        else {
-            return;
-        };
-        if index != 0 {
-            let server = entry.image_servers.remove(index);
-            entry.image_servers.insert(0, server);
-        }
-    }
-}
-
-fn normalize_cdn_servers(servers: Vec<String>) -> Vec<String> {
-    let mut normalized = Vec::new();
-    for server in servers {
-        let server = server.trim().trim_end_matches('/');
-        if !server.is_empty() && !normalized.iter().any(|known| known == server) {
-            normalized.push(server.to_string());
-        }
-    }
-    normalized
-}
-
-fn build_cdn_image_candidates(url: &str, image_servers: &[String]) -> Vec<(String, String)> {
-    let suffix = image_servers
-        .iter()
-        .filter_map(|server| {
-            let server = server.trim_end_matches('/');
-            let suffix = url.strip_prefix(server)?;
-            (suffix.is_empty() || suffix.starts_with('/') || suffix.starts_with('?'))
-                .then_some(suffix)
-        })
-        .next()
-        .or_else(|| url.find("/galleries/").map(|index| &url[index..]));
-
-    let Some(suffix) = suffix else {
-        return vec![(String::new(), url.to_string())];
-    };
-
-    let mut candidates = Vec::new();
-    for image_server in image_servers {
-        let image_server = image_server.trim_end_matches('/');
-        if image_server.is_empty() {
-            continue;
-        }
-        let candidate = format!("{image_server}{suffix}");
-        if !candidates.iter().any(|(_, known)| known == &candidate) {
-            candidates.push((image_server.to_string(), candidate));
-        }
-    }
-    if !candidates.iter().any(|(_, known)| known == url) {
-        candidates.push((String::new(), url.to_string()));
-    }
-    candidates
 }
 
 impl GalleryPageCache {
@@ -263,6 +193,7 @@ impl GalleryPageCache {
 pub struct NHentai {
     preferences: Vec<Input>,
     client: FlareClient,
+    image_client: RateLimitedAgent,
     gallery_cache: Mutex<GalleryPageCache>,
     cdn_cache: Mutex<CdnConfigCache>,
 }
@@ -276,6 +207,7 @@ impl Default for NHentai {
                 Some(REQUESTS_PER_SECOND),
                 "nhentai",
             ),
+            image_client: build_rate_limited_ureq_agent(None, Some(REQUESTS_PER_SECOND)),
             gallery_cache: Mutex::new(GalleryPageCache::default()),
             cdn_cache: Mutex::new(CdnConfigCache::default()),
         }
@@ -400,8 +332,7 @@ impl NHentai {
             .fetch_text(&cdn_url)
             .map_err(|e| anyhow!(e.to_string()))?;
         let cdn: CdnConfigResponse = parse_api_response(&cdn_res, "CDN")?;
-        let image_servers = normalize_cdn_servers(cdn.image_servers);
-        if image_servers.is_empty() {
+        if cdn.image_servers.is_empty() {
             return Err(anyhow!("NHentai CDN API returned no image servers"));
         }
 
@@ -409,24 +340,8 @@ impl NHentai {
             .cdn_cache
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.insert(image_servers.clone());
-        Ok(image_servers)
-    }
-
-    fn promote_cdn_server(&self, image_server: &str) {
-        let mut cache = self
-            .cdn_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.promote(image_server);
-    }
-
-    fn invalidate_cdn_cache(&self) {
-        let mut cache = self
-            .cdn_cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        cache.entry = None;
+        cache.insert(cdn.image_servers.clone());
+        Ok(cdn.image_servers)
     }
 
     fn query_parts(&self, filters: Option<Vec<Input>>) -> (String, Option<String>) {
@@ -435,26 +350,21 @@ impl NHentai {
 
         // preferences: language + global blacklist
         for pref in self.preferences.iter() {
-            if LANGUAGE_SELECT.eq(pref) {
-                if let Input::Select { state, values, .. } = pref {
-                    if let Some(InputType::String(lang)) =
-                        state.and_then(|i| values.get(i as usize))
-                    {
-                        if lang != "Any" {
-                            query.push(format!("language:{}", lang.to_lowercase()));
-                        }
-                    }
-                }
-            } else if BLACKLIST_TAG.eq(pref) {
-                if let Input::Text {
+            if LANGUAGE_SELECT.eq(pref)
+                && let Input::Select { state, values, .. } = pref
+                && let Some(InputType::String(lang)) = state.and_then(|i| values.get(i as usize))
+                && lang != "Any"
+            {
+                query.push(format!("language:{}", lang.to_lowercase()));
+            } else if BLACKLIST_TAG.eq(pref)
+                && let Input::Text {
                     state: Some(state), ..
                 } = pref
-                {
-                    for tag in state.split(',') {
-                        let t = norm_value(tag);
-                        if !t.is_empty() {
-                            query.push(format!("-tag:{t}"));
-                        }
+            {
+                for tag in state.split(',') {
+                    let t = norm_value(tag);
+                    if !t.is_empty() {
+                        query.push(format!("-tag:{t}"));
                     }
                 }
             }
@@ -541,7 +451,7 @@ impl NHentai {
                 .select(&image_selector)
                 .flat_map(|thumbnail| thumbnail.value().attr("src"))
                 .next()
-                .map(|s| normalize_url(s))
+                .map(normalize_url)
                 .ok_or_else(|| anyhow!("cover_url not found"))?;
 
             let path = gallery
@@ -584,35 +494,21 @@ impl NHentai {
 }
 
 impl Extension for NHentai {
-    fn set_preferences(&mut self, preferences: Vec<Input>) -> anyhow::Result<()> {
-        for input in preferences {
-            for pref in self.preferences.iter_mut() {
-                if input.eq(pref) {
-                    *pref = input.clone();
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    fn get_preferences(&self) -> anyhow::Result<Vec<Input>> {
-        Ok(self.preferences.clone())
-    }
+    extension_utils::impl_preferences!(preferences);
 
     fn get_source_info(&self) -> SourceInfo {
         SourceInfo {
             id: ID,
             name: NAME.to_string(),
             url: URL.to_string(),
-            version: env!("CARGO_PKG_VERSION"),
-            icon: "https://nhentai.net/static/img/logo.14bbfa78d3d0.svg",
+            version: VERSION,
+            icon: ICON_URL,
             languages: Lang::Multi(vec!["en".to_string(), "ja".to_string(), "zh".to_string()]),
             nsfw: true,
         }
     }
 
-    fn get_popular_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+    fn get_popular_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_popular_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
@@ -622,7 +518,7 @@ impl Extension for NHentai {
         )
     }
 
-    fn get_latest_manga(&self, page: i64) -> anyhow::Result<Vec<MangaInfo>> {
+    fn get_latest_manga(&self, page: i64) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: get_latest_manga page={page}");
         let (q, _) = self.query_parts(None);
         let q = encode(&q);
@@ -634,7 +530,7 @@ impl Extension for NHentai {
         page: i64,
         query: Option<String>,
         filters: Option<Vec<Input>>,
-    ) -> anyhow::Result<Vec<MangaInfo>> {
+    ) -> Result<Vec<MangaInfo>> {
         log::debug!("{NAME}: search_manga page={page} query={query:?}");
         let url = if let Some(filters) = filters {
             let (q_raw, sort) = self.query_parts(Some(filters));
@@ -652,7 +548,7 @@ impl Extension for NHentai {
         self.get_manga_list(&url, true)
     }
 
-    fn get_manga_detail(&self, path: String) -> anyhow::Result<MangaInfo> {
+    fn get_manga_detail(&self, path: String) -> Result<MangaInfo> {
         log::debug!("{NAME}: get_manga_detail path={path}");
         let res = self.fetch_gallery(&path)?;
 
@@ -681,12 +577,11 @@ impl Extension for NHentai {
         let mut description = "".to_string();
         if let Some(gallery_id) = document.select(&gallery_id_selector).next().map(|el| {
             el.text()
-                .into_iter()
                 .map(|id| id.to_string())
                 .collect::<Vec<String>>()
                 .join("")
         }) {
-            description = format!("{}", gallery_id);
+            description = gallery_id;
         }
         let parodies = document
             .select(&parodies_selector)
@@ -722,7 +617,6 @@ impl Extension for NHentai {
         }
         if let Some(pages) = document.select(&pages_selector).next().map(|el| {
             el.text()
-                .into_iter()
                 .map(|id| id.to_string())
                 .collect::<Vec<String>>()
                 .join("")
@@ -734,7 +628,7 @@ impl Extension for NHentai {
             .select(&thumbnail_selector)
             .flat_map(|el| el.value().attr("src"))
             .next()
-            .map(|s| normalize_url(s))
+            .map(normalize_url)
             .ok_or_else(|| anyhow!("cover not found"))?;
 
         let title = document
@@ -767,7 +661,7 @@ impl Extension for NHentai {
         Ok(manga)
     }
 
-    fn get_chapters(&self, path: String) -> anyhow::Result<Vec<ChapterInfo>> {
+    fn get_chapters(&self, path: String) -> Result<Vec<ChapterInfo>> {
         log::debug!("{NAME}: get_chapters path={path}");
         let res = self.fetch_gallery(&path)?;
 
@@ -795,13 +689,13 @@ impl Extension for NHentai {
             path,
             number: 1_f64,
             scanlator,
-            uploaded: uploaded.unwrap_or_else(|| 0),
+            uploaded: uploaded.unwrap_or(0),
         };
 
         Ok(vec![chapter])
     }
 
-    fn get_pages(&self, path: String) -> anyhow::Result<Vec<String>> {
+    fn get_pages(&self, path: String) -> Result<Vec<String>> {
         log::debug!("{NAME}: get_pages path={path}");
         let gallery_id = path
             .trim_matches('/')
@@ -823,41 +717,11 @@ impl Extension for NHentai {
         build_gallery_page_urls(gallery_id, &gallery, image_server)
     }
 
-    fn headers(&self) -> std::collections::HashMap<String, String> {
-        std::collections::HashMap::new()
-    }
-
     fn filter_list(&self) -> Vec<Input> {
         FILTER_LIST.clone()
     }
 
-    fn get_image_bytes(&self, url: String) -> anyhow::Result<Bytes> {
-        log::debug!("{NAME}: get_image_bytes url={url}");
-        let image_servers = self.fetch_cdn_servers().unwrap_or_else(|error| {
-            log::debug!("{NAME}: CDN mirror lookup failed, using original image URL: {error:#}");
-            Vec::new()
-        });
-        let candidates = build_cdn_image_candidates(&url, &image_servers);
-        let mut last_error = None;
-
-        for (image_server, candidate) in candidates {
-            match self.client.fetch_bytes(&candidate) {
-                Ok(bytes) => {
-                    if !image_server.is_empty() {
-                        self.promote_cdn_server(&image_server);
-                    }
-                    return Ok(bytes);
-                }
-                Err(error) => {
-                    log::debug!("{NAME}: CDN image candidate failed url={candidate}: {error:#}");
-                    last_error = Some(error);
-                }
-            }
-        }
-
-        self.invalidate_cdn_cache();
-        Err(last_error.unwrap_or_else(|| anyhow!("NHentai image URL list was empty")))
-    }
+    extension_utils::impl_direct_image_fetch!(image_client, NAME, URL);
 }
 
 #[cfg(test)]
@@ -902,65 +766,6 @@ mod test {
         assert_eq!(
             cache.get("https://nhentai.net/g/two"),
             Some("two".to_string())
-        );
-    }
-
-    #[test]
-    fn cdn_cache_reuses_and_promotes_mirrors() {
-        let mut cache = CdnConfigCache::default();
-        cache.insert(vec![
-            "https://i1.nhentai.net".to_string(),
-            "https://i2.nhentai.net".to_string(),
-        ]);
-
-        assert_eq!(
-            cache.get(),
-            Some(vec![
-                "https://i1.nhentai.net".to_string(),
-                "https://i2.nhentai.net".to_string(),
-            ])
-        );
-
-        cache.promote("https://i2.nhentai.net");
-        assert_eq!(
-            cache.get(),
-            Some(vec![
-                "https://i2.nhentai.net".to_string(),
-                "https://i1.nhentai.net".to_string(),
-            ])
-        );
-    }
-
-    #[test]
-    fn cdn_image_candidates_preserve_query_and_include_mirrors() {
-        let servers = vec![
-            "https://i1.nhentai.net".to_string(),
-            "https://i2.nhentai.net".to_string(),
-            "https://i3.nhentai.net".to_string(),
-        ];
-        let url = "https://i1.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net";
-
-        let candidates = build_cdn_image_candidates(url, &servers);
-
-        assert_eq!(
-            candidates[0],
-            ("https://i1.nhentai.net".to_string(), url.to_string())
-        );
-        assert_eq!(
-            candidates[1],
-            (
-                "https://i2.nhentai.net".to_string(),
-                "https://i2.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net"
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            candidates[2],
-            (
-                "https://i3.nhentai.net".to_string(),
-                "https://i3.nhentai.net/galleries/123/1.jpg?referer=https://nhentai.net"
-                    .to_string()
-            )
         );
     }
 
@@ -1059,18 +864,18 @@ mod test {
 
         let mut filters = nhentai.filter_list();
         for filter in filters.iter_mut() {
-            if SORT_FILTER.eq(filter) {
-                if let Input::Select { state, .. } = filter {
-                    *state = Some(1);
-                }
-            } else if TAG_FILTER.eq(filter) {
-                if let Input::Text { state, .. } = filter {
-                    *state = Some("-big breasts".to_string());
-                }
-            } else if PARODIES_FILTER.eq(filter) {
-                if let Input::Text { state, .. } = filter {
-                    *state = Some("azur-lane".to_string());
-                }
+            if SORT_FILTER.eq(filter)
+                && let Input::Select { state, .. } = filter
+            {
+                *state = Some(1);
+            } else if TAG_FILTER.eq(filter)
+                && let Input::Text { state, .. } = filter
+            {
+                *state = Some("-big breasts".to_string());
+            } else if PARODIES_FILTER.eq(filter)
+                && let Input::Text { state, .. } = filter
+            {
+                *state = Some("azur-lane".to_string());
             }
         }
         let res = nhentai.search_manga(1, None, Some(filters)).unwrap();

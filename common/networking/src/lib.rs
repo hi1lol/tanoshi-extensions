@@ -3,6 +3,7 @@ mod ratelimit;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use cookie::time::OffsetDateTime as CookieOffsetDateTime;
+use cookie_store as _;
 use log::{debug, info, warn};
 use ratelimit::RateLimiter;
 use scraper::{Html, Selector};
@@ -80,6 +81,12 @@ impl RateLimitedAgent {
             limiter: self.limiter.clone(),
             url: url.to_string(),
         }
+    }
+
+    /// Perform a throttled GET and read the response body as text.
+    pub fn fetch_text(&self, url: &str) -> Result<String> {
+        let mut response = self.get(url).call()?;
+        Ok(response.body_mut().read_to_string()?)
     }
 
     pub fn fetch_bytes(&self, url: &str, referer: Option<&str>) -> anyhow::Result<Bytes> {
@@ -222,10 +229,10 @@ pub struct FlareSolverrCookie {
 
 pub fn build_ureq_agent(user_agent: Option<&str>) -> Agent {
     let mut cfg = Agent::config_builder().max_redirects(5);
-    if let Some(ua) = user_agent {
-        if !ua.is_empty() {
-            cfg = cfg.user_agent(ua);
-        }
+    if let Some(ua) = user_agent
+        && !ua.is_empty()
+    {
+        cfg = cfg.user_agent(ua);
     }
     cfg.build().into()
 }
@@ -240,10 +247,10 @@ fn build_lenient_ureq_agent(user_agent: Option<&str>) -> Agent {
     let mut cfg = Agent::config_builder()
         .max_redirects(5)
         .http_status_as_error(false);
-    if let Some(ua) = user_agent {
-        if !ua.is_empty() {
-            cfg = cfg.user_agent(ua);
-        }
+    if let Some(ua) = user_agent
+        && !ua.is_empty()
+    {
+        cfg = cfg.user_agent(ua);
     }
     cfg.build().into()
 }
@@ -303,13 +310,12 @@ fn insert_flaresolverr_cookies_into_agent(agent: &Agent, cookies: Vec<FlareSolve
             _ => {}
         }
         // Expires
-        if let Some(expiry) = c.expiry {
-            if let Ok(ts) = CookieOffsetDateTime::from_unix_timestamp(expiry as i64) {
-                let max_age =
-                    ts.unix_timestamp() - CookieOffsetDateTime::now_utc().unix_timestamp();
-                if max_age > 0 {
-                    parts.push(format!("Max-Age={}", max_age));
-                }
+        if let Some(expiry) = c.expiry
+            && let Ok(ts) = CookieOffsetDateTime::from_unix_timestamp(expiry as i64)
+        {
+            let max_age = ts.unix_timestamp() - CookieOffsetDateTime::now_utc().unix_timestamp();
+            if max_age > 0 {
+                parts.push(format!("Max-Age={}", max_age));
             }
         }
 
@@ -829,7 +835,7 @@ impl FlareClient {
             "GET",
             url,
             |client, request_url| client.try_direct_get(request_url),
-            |fs_url, session_id, request_url| proxy_fetch_text(fs_url, session_id, request_url),
+            proxy_fetch_text,
         )
     }
 
@@ -1118,7 +1124,7 @@ impl FlareClient {
             "POST",
             url,
             |client, request_url| client.try_direct_post_empty(request_url, extra_headers),
-            |fs_url, session_id, request_url| proxy_post_empty(fs_url, session_id, request_url),
+            proxy_post_empty,
         )
     }
 }
